@@ -91,11 +91,8 @@ impl BddClusterHarness {
         let scheduler = Arc::new(ClusterScheduler::new());
         let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
 
-        let server_tls = build_server_mtls_config(
-            &pki.server_cert_pem,
-            &pki.server_key_pem,
-            &pki.ca_cert_pem,
-        );
+        let server_tls =
+            build_server_mtls_config(&pki.server_cert_pem, &pki.server_key_pem, &pki.ca_cert_pem);
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await

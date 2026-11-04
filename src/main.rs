@@ -61,8 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server_cert_pem = tokio::fs::read(cert_path).await?;
         let server_key_pem = tokio::fs::read(key_path).await?;
 
-        let server_tls =
-            build_server_mtls_config(&server_cert_pem, &server_key_pem, &ca_cert_pem);
+        let server_tls = build_server_mtls_config(&server_cert_pem, &server_key_pem, &ca_cert_pem);
         server_builder = server_builder.tls_config(server_tls)?;
     } else {
         warn!("mTLS credentials not specified; binding plaintext service [development mode]");

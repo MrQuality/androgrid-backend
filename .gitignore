@@ -33,6 +33,10 @@ rustc-ice-*.txt
 !*.env.example
 credentials.json
 cloudflare-tunnel.json
+/pki/
+/.pki/
+/deploy/pki/
+/deploy/credentials.json
 
 # Developer Environments & Tooling
 .agents/

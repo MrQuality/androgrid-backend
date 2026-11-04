@@ -1,0 +1,25 @@
+[package]
+name = "androgrid-backend"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "MIT"
+description = "High-concurrency Rust control plane for distributed mobile edge computing."
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
+prost = "0.13"
+prost-types = "0.13"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1.0"
+
+[build-dependencies]
+tonic-build = { version = "0.12", features = ["prost"] }
+prost-build = "0.13"
+protoc-bin-vendored = "3.3"
+
+[dev-dependencies]
+proptest = "1.5"
+tokio-test = "0.4"

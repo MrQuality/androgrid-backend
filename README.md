@@ -1,2 +1,91 @@
-# androgrid-backend
-AndroGrid Distributed Mobile Edge Cluster — Control Plane &amp; Orchestrator
+# AndroGrid Control Plane
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![Rust](https://img.shields.io/badge/Rust-1.82%2B-orange.svg)](https://www.rust-lang.org)
+[![Tokio](https://img.shields.io/badge/Runtime-Tokio%201.40-blueviolet.svg)](https://tokio.rs)
+[![gRPC](https://img.shields.io/badge/RPC-Tonic%200.12-244c5a.svg)](https://github.com/hyperium/tonic)
+[![Security](https://img.shields.io/badge/Security-TLS%201.3%20mTLS-brightgreen.svg)](https://github.com/rustls/rustls)
+
+The high-concurrency Rust control plane and task orchestrator for **AndroGrid**: a distributed edge-compute cluster that harnesses heterogeneous Android devices as worker compute nodes across local Wi-Fi and metered Cellular WAN connections.
+
+---
+
+## Architecture Overview
+
+The Host Control Plane coordinates task scheduling, speculative dual-assignment, monotonic fencing, and result consensus:
+
+- **Monotonic Attempt Fencing (`[INV-004]`):** Every dispatched task carries a monotonically increasing `run_attempt`. Submissions with stale attempt counters are atomically discarded with `TASK_ATTEMPT_STALE`, eliminating double-commit races.
+- **Cellular Spot Preemption (`[INV-005]`):** Cellular tasks operate as speculative spot instances capped at 180 seconds. If an unmetered Wi-Fi worker connects, the task is dual-assigned with `run_attempt + 1`. The first node to commit wins.
+- **Zero Inbound Mobile Ports (`[INV-001]`):** Mobile workers never bind or listen on server sockets. All network connections originate outbound from the worker nodes to the control plane.
+- **Mutual TLS 1.3 (`[INV-002]`):** Full bidirectional cryptographic identity verification across all network interfaces using internal X.509 certificates.
+- **Dual Transport Routing:** Supports persistent HTTP/2 declarative synchronization over local LAN and disconnected, zero-keepalive unary gRPC requests over Cloudflare Anycast ingress on cellular connections.
+
+---
+
+## Canonical gRPC Service Interface
+
+The service definition (`androgrid.v1.AndroGridService`) provides two distinct interaction surfaces:
+
+### 1. Wi-Fi Persistent Declarative Surface
+- `RegisterNode`: Validates hardware capabilities and issues session tokens.
+- `SyncNodeState`: Periodic 2.0-second state synchronization for active and completed tasks.
+
+### 2. Cellular Disconnected Unary Surface (Zero-Keepalive)
+- `ClaimCellularTask`: Unary task lease request (enforcing low-power RRC radio sleep).
+- `SubmitCellularResult`: Atomic task result submission with attempt fencing.
+
+---
+
+## Getting Started
+
+### Prerequisites
+- **Rust Toolchain:** Version 1.82 or newer (`rustup default stable`)
+- **Protocol Buffers Compiler:** `protoc` 3.25+ or `buf` CLI
+
+### Building from Source
+```bash
+# Clone the repository
+git clone https://github.com/MrQuality/androgrid-backend.git
+cd androgrid-backend
+
+# Build release binary
+cargo build --release
+
+# Run unit and integration tests
+cargo test
+```
+
+---
+
+## Project Structure
+
+```text
+androgrid-backend/
+├── proto/              # Canonical Protocol Buffer contracts
+│   └── androgrid/v1/
+│       └── orchestrator.proto
+├── src/                # Control plane source code
+│   ├── main.rs         # Application entry point
+│   ├── scheduler/      # Dual-assignment & monotonic fencing logic
+│   ├── transport/      # Tonic gRPC services & TLS configuration
+│   └── state/          # In-memory lock-free task state management
+├── tests/              # Acceptance and concurrency test suites
+├── build.rs            # Tonic proto compilation build script
+└── Cargo.toml          # Rust crate configuration
+```
+
+---
+
+## Community and Governance
+
+We welcome contributions to AndroGrid! Please review our community guidelines:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): Workflow guidelines, branch discipline, and testing mandates.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md): Contributor Covenant v2.1 standards.
+- [SECURITY.md](SECURITY.md): Responsible disclosure policy for security vulnerabilities.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

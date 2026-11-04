@@ -1,0 +1,20 @@
+# Cloudflare Tunnel (cloudflared) Ingress Configuration Template
+# Traces to: AG-SPEC-2026-V2 Section 2.3, [ANTI-002], [REQ-OP-003]
+#
+# Enables remote cellular WAN workers to reach the local orchestrator control plane
+# via Cloudflare Anycast gRPC ingress without router port-forwarding or public static IPs.
+
+tunnel: <REPLACE_WITH_TUNNEL_UUID>
+credentials-file: /etc/cloudflared/credentials.json
+
+ingress:
+  # Route gRPC WAN traffic to local Rust orchestrator control plane
+  - hostname: grpc.cluster.domain.com
+    service: https://localhost:50051
+    originRequest:
+      http2Origin: true
+      noTLSVerify: false
+      caPool: /etc/cloudflared/ca.crt
+
+  # Default catch-all service returns HTTP 404 for unmatched hostnames
+  - service: http_status:404

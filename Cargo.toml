@@ -23,3 +23,5 @@ protoc-bin-vendored = "3.3"
 [dev-dependencies]
 proptest = "1.5"
 tokio-test = "0.4"
+tokio-stream = { version = "0.1", features = ["net"] }
+rcgen = "0.13"

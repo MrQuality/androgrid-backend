@@ -18,6 +18,9 @@ pub use proto::androgrid::v1::*;
 pub mod scheduler;
 pub use scheduler::*;
 
+pub mod transport;
+pub use transport::*;
+
 use thiserror::Error;
 
 /// Maximum allowable gRPC message frame payload bound in bytes (16 MB).

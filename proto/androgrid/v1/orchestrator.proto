@@ -1,0 +1,163 @@
+syntax = "proto3";
+
+package androgrid.v1;
+
+option java_package = "com.androgrid.v1";
+option java_multiple_files = true;
+
+// AndroGridService provides cluster orchestration between the Host Control Plane
+// and distributed Android Worker Nodes.
+// Traces to: [REQ-OP-001], [REQ-OP-002], [REQ-OP-003], [REQ-OP-004]
+service AndroGridService {
+  // Wi-Fi Persistent Declarative Loop
+  // Traces to: [REQ-OP-001]
+  rpc RegisterNode(RegisterNodeRequest) returns (RegisterNodeResponse);
+
+  // Traces to: [REQ-OP-002]
+  rpc SyncNodeState(SyncNodeStateRequest) returns (SyncNodeStateResponse);
+
+  // Cellular Disconnected Unary Surface (Zero-Keepalive)
+  // Traces to: [REQ-OP-003], [INV-003], [NFR-POW-001]
+  rpc ClaimCellularTask(ClaimCellularTaskRequest) returns (ClaimCellularTaskResponse);
+
+  // Traces to: [REQ-OP-004], [INV-004], [NFR-REL-001]
+  rpc SubmitCellularResult(SubmitCellularResultRequest) returns (SubmitCellularResultResponse);
+}
+
+// Active network interface type reported by worker node.
+enum NetworkTransportType {
+  NETWORK_TRANSPORT_UNSPECIFIED = 0;
+  NETWORK_TRANSPORT_WIFI_LAN = 1;
+  NETWORK_TRANSPORT_CELLULAR_WAN = 2;
+}
+
+// Supported compute execution sandbox runtime on client device.
+// Traces to: [INV-006]
+enum ExecutionEngine {
+  EXECUTION_ENGINE_UNSPECIFIED = 0;
+  EXECUTION_ENGINE_WASM_WASI = 1;
+  EXECUTION_ENGINE_ROOT_SHELL = 2;
+  EXECUTION_ENGINE_TOYBOX_USER = 3;
+}
+
+// Task execution lifecycle states.
+enum TaskState {
+  TASK_STATE_UNSPECIFIED = 0;
+  TASK_STATE_PENDING = 1;
+  TASK_STATE_LEASED = 2;
+  TASK_STATE_RUNNING = 3;
+  TASK_STATE_COMPLETED = 4;
+  TASK_STATE_FAILED = 5;
+  TASK_STATE_PREEMPTED = 6;
+  TASK_STATE_TIMED_OUT = 7;
+}
+
+// Hardware and platform capabilities reported by worker node.
+// Traces to: [REQ-VER-002], [INV-006]
+message NodeCapabilities {
+  bool is_rooted = 1;
+  repeated ExecutionEngine supported_engines = 2;
+  uint32 cpu_cores = 3;
+  uint64 total_ram_bytes = 4;
+  string os_version = 5;
+  string abi = 6;
+  bool is_metered = 7;
+  NetworkTransportType current_transport = 8;
+  uint32 max_cellular_task_duration_seconds = 9; // Max duration constraint (e.g., 180s per [INV-005])
+}
+
+// Execution specification for an assigned compute task.
+// Traces to: [INV-004], [INV-005], [NFR-PERF-001]
+message TaskSpec {
+  string task_id = 1;
+  uint32 run_attempt = 2;
+  ExecutionEngine engine = 3;
+  uint32 timeout_seconds = 4;
+  string entrypoint = 5;
+  map<string, string> env_vars = 6;
+  bytes wasm_bytecode = 7;
+  string shell_command = 8;
+  string artifact_sha256 = 9;
+  bool requires_unmetered = 10;
+}
+
+// Unary request to claim a spot task over cellular WAN.
+// Traces to: [REQ-OP-003], [INV-003]
+message ClaimCellularTaskRequest {
+  string node_id = 1;
+  NodeCapabilities capabilities = 2;
+  uint32 battery_level_pct = 3;
+  bool is_charging = 4;
+}
+
+// Response granting a cellular spot lease.
+// Traces to: [REQ-OP-003], [INV-005]
+message ClaimCellularTaskResponse {
+  bool task_available = 1;
+  TaskSpec task = 2;
+  uint32 deadline_epoch_seconds = 3;
+}
+
+// Atomic result submission with monotonic run_attempt.
+// Traces to: [REQ-OP-004], [INV-004]
+message SubmitCellularResultRequest {
+  string node_id = 1;
+  string task_id = 2;
+  uint32 run_attempt = 3;
+  int32 exit_code = 4;
+  bytes stdout_bytes = 5;
+  bytes stderr_bytes = 6;
+  string error_code = 7;
+  string error_message = 8;
+  uint64 execution_duration_ms = 9;
+}
+
+// Orchestrator response to atomic result submission.
+message SubmitCellularResultResponse {
+  bool accepted = 1;
+  string status_message = 2;
+}
+
+// Initial node registration over local Wi-Fi.
+// Traces to: [REQ-OP-001]
+message RegisterNodeRequest {
+  string node_id = 1;
+  NodeCapabilities capabilities = 2;
+  string client_version = 3;
+}
+
+// Registration lease response.
+message RegisterNodeResponse {
+  string session_token = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  uint32 lease_timeout_seconds = 3;
+}
+
+// Status report for an active or completed task.
+message TaskExecutionReport {
+  string task_id = 1;
+  uint32 run_attempt = 2;
+  TaskState state = 3;
+  int32 exit_code = 4;
+  bytes stdout_bytes = 5;
+  bytes stderr_bytes = 6;
+  string error_code = 7;
+  uint64 execution_time_ms = 8;
+}
+
+// Periodic declarative state synchronization over Wi-Fi.
+// Traces to: [REQ-OP-002]
+message SyncNodeStateRequest {
+  string node_id = 1;
+  string session_token = 2;
+  repeated TaskExecutionReport active_tasks = 3;
+  repeated TaskExecutionReport completed_tasks = 4;
+}
+
+// Orchestrator response with desired tasks and acknowledgments.
+message SyncNodeStateResponse {
+  uint64 server_epoch_ms = 1;
+  repeated TaskSpec desired_tasks = 2;
+  repeated string cancel_task_ids = 3;
+  repeated string acknowledged_task_ids = 4;
+}

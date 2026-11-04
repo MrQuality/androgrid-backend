@@ -12,15 +12,9 @@ use crate::MAX_FRAME_SIZE_BYTES;
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ConfigError {
     #[error("Invalid socket address format in {var}: {val}")]
-    InvalidSocketAddr {
-        var: &'static str,
-        val: String,
-    },
+    InvalidSocketAddr { var: &'static str, val: String },
     #[error("Invalid integer value in {var}: {val}")]
-    InvalidInteger {
-        var: &'static str,
-        val: String,
-    },
+    InvalidInteger { var: &'static str, val: String },
 }
 
 /// Orchestrator host control plane configuration settings.
@@ -105,10 +99,11 @@ impl ClusterConfig {
         }
 
         if let Ok(val) = std::env::var("ANDROGRID_LEASE_TIMEOUT_SECS") {
-            config.lease_timeout_seconds = val.parse().map_err(|_| ConfigError::InvalidInteger {
-                var: "ANDROGRID_LEASE_TIMEOUT_SECS",
-                val,
-            })?;
+            config.lease_timeout_seconds =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_LEASE_TIMEOUT_SECS",
+                    val,
+                })?;
         }
 
         Ok(config)

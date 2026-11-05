@@ -6,8 +6,10 @@
 //!
 //! Traces to: AG-SPEC-2026-V2, [REQ-OP-001], [REQ-OP-003], [REQ-OP-004], [INV-002], [NFR-SEC-001]
 
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -312,6 +314,196 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         .into_inner();
     assert_eq!(status_cancelled.state, TaskState::Failed as i32);
     assert_eq!(status_cancelled.error_code, "TASK_CANCELLED");
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha256() {
+    let pki = TestPki::generate();
+    let scheduler = Arc::new(ClusterScheduler::new());
+    let (server_addr, shutdown_tx) = spawn_test_server(Arc::clone(&scheduler), &pki).await;
+
+    let admin_tls = build_client_mtls_config(
+        &pki.client_cert_pem,
+        &pki.client_key_pem,
+        &pki.ca_cert_pem,
+        "localhost",
+    );
+    let channel = Channel::from_shared(format!("https://127.0.0.1:{}", server_addr.port()))
+        .unwrap()
+        .tls_config(admin_tls)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Admin client should connect over mTLS");
+    let mut admin_client = AdminServiceClient::new(channel);
+
+    let worker_tls = build_client_mtls_config(
+        &pki.client_cert_pem,
+        &pki.client_key_pem,
+        &pki.ca_cert_pem,
+        "localhost",
+    );
+    let worker_channel = Channel::from_shared(format!("https://127.0.0.1:{}", server_addr.port()))
+        .unwrap()
+        .tls_config(worker_tls)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Worker client should connect over mTLS");
+    let mut worker_client = AndroGridServiceClient::new(worker_channel);
+
+    // Register test worker node supporting WASM
+    let worker_caps = NodeCapabilities {
+        is_rooted: false,
+        supported_engines: vec![
+            ExecutionEngine::ToyboxUser as i32,
+            ExecutionEngine::WasmWasi as i32,
+        ],
+        cpu_cores: 8,
+        total_ram_bytes: 8 * 1024 * 1024 * 1024,
+        os_version: "14".to_string(),
+        abi: "arm64-v8a".to_string(),
+        is_metered: false,
+        current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
+        max_cellular_task_duration_seconds: 180,
+    };
+
+    let reg_req = RegisterNodeRequest {
+        node_id: "android_node_wasm_verifier".to_string(),
+        capabilities: Some(worker_caps.clone()),
+        client_version: "0.1.0".to_string(),
+    };
+    worker_client.register_node(reg_req).await.unwrap();
+
+    let fixtures = [
+        (
+            "fibonacci.wasm",
+            "2986333e9b06b321fefdec5227576a9c695c95a3a3fd442e0b20196d3e6a152b",
+            "fibonacci",
+            67,
+        ),
+        (
+            "env_echo.wasm",
+            "44d49882427ac4fdf46c27abb3ed22a61a3e8024f9186afeb44ecd8f9f224720",
+            "_start",
+            165,
+        ),
+        (
+            "trap_abort.wasm",
+            "187e8d9bf0a3454a6765f0eb83f1398f350a5c053bd3907b430dd05f4c91134f",
+            "_start",
+            37,
+        ),
+        (
+            "infinite_loop.wasm",
+            "4ed2cef087a79f7abf368e3903d56c80dd716912cb78b7c9df8a9a8046c5f3a9",
+            "_start",
+            41,
+        ),
+        (
+            "hello_wasi.wasm",
+            "a3cb46ccd67461cd02e6d113da021c8e8268285357eb947b003428f6c972338d",
+            "_start",
+            153,
+        ),
+    ];
+
+    for (idx, (filename, expected_sha, entrypoint, expected_size)) in fixtures.iter().enumerate() {
+        let fixture_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/wasm")
+            .join(filename);
+
+        assert!(
+            fixture_path.exists(),
+            "WASM fixture file must exist: {}",
+            fixture_path.display()
+        );
+
+        let bytecode = tokio::fs::read(&fixture_path)
+            .await
+            .expect("Fixture reading must succeed");
+        assert_eq!(bytecode.len(), *expected_size);
+
+        // Verify SHA-256 computation
+        let mut hasher = Sha256::new();
+        hasher.update(&bytecode);
+        let computed_sha = format!("{:x}", hasher.finalize());
+        assert_eq!(&computed_sha, expected_sha);
+
+        // Verify [NFR-PERF-001] frame bounds (< 16 MB)
+        assert!(bytecode.len() < 16 * 1024 * 1024);
+
+        let task_id = format!("task_fixture_{idx}_{filename}");
+        let task_spec = TaskSpec {
+            task_id: task_id.clone(),
+            run_attempt: 1,
+            engine: ExecutionEngine::WasmWasi as i32,
+            timeout_seconds: 30,
+            entrypoint: entrypoint.to_string(),
+            env_vars: HashMap::from([("CLUSTER_ENV".to_string(), "test".to_string())]),
+            wasm_bytecode: bytecode.clone(),
+            shell_command: String::new(),
+            artifact_sha256: computed_sha,
+            requires_unmetered: false,
+        };
+
+        // Submit task via AdminService
+        let submit_res = admin_client
+            .submit_task(SubmitTaskRequest {
+                task: Some(task_spec),
+            })
+            .await
+            .expect("Task submission should succeed")
+            .into_inner();
+        assert!(submit_res.accepted);
+
+        // Claim task via AndroGridService
+        let claim_res = worker_client
+            .claim_cellular_task(ClaimCellularTaskRequest {
+                node_id: "android_node_wasm_verifier".to_string(),
+                capabilities: Some(worker_caps.clone()),
+                battery_level_pct: 85,
+                is_charging: true,
+            })
+            .await
+            .expect("Worker should successfully claim task")
+            .into_inner();
+        assert!(claim_res.task_available);
+        let claimed_task = claim_res.task.expect("Claimed task must be present");
+        assert_eq!(claimed_task.wasm_bytecode, bytecode);
+        assert_eq!(claimed_task.artifact_sha256, *expected_sha);
+
+        // Complete task execution
+        let submit_result_res = worker_client
+            .submit_cellular_result(SubmitCellularResultRequest {
+                node_id: "android_node_wasm_verifier".to_string(),
+                task_id: task_id.clone(),
+                run_attempt: 1,
+                exit_code: 0,
+                stdout_bytes: b"execution verified".to_vec(),
+                stderr_bytes: Vec::new(),
+                error_code: String::new(),
+                error_message: String::new(),
+                execution_duration_ms: 10,
+            })
+            .await
+            .expect("Result submission must succeed")
+            .into_inner();
+        assert!(submit_result_res.accepted);
+
+        // Verify task state is COMPLETED
+        let status = admin_client
+            .get_task_status(GetTaskStatusRequest {
+                task_id: task_id.clone(),
+            })
+            .await
+            .expect("Status query must succeed")
+            .into_inner();
+        assert_eq!(status.state, TaskState::Completed as i32);
+        assert_eq!(status.exit_code, 0);
+    }
 
     let _ = shutdown_tx.send(());
 }

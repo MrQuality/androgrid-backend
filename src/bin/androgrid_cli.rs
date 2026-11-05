@@ -558,4 +558,22 @@ mod tests {
             _ => panic!("Expected Cancel command"),
         }
     }
+
+    #[tokio::test]
+    async fn test_cli_submit_wasm_fixture_sha256_computation() {
+        let fixture_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm/fibonacci.wasm");
+        assert!(fixture_path.exists());
+
+        let bytecode = tokio::fs::read(&fixture_path).await.unwrap();
+        let mut hasher = Sha256::new();
+        hasher.update(&bytecode);
+        let sha256_hex = format!("{:x}", hasher.finalize());
+
+        assert_eq!(
+            sha256_hex,
+            "2986333e9b06b321fefdec5227576a9c695c95a3a3fd442e0b20196d3e6a152b"
+        );
+        assert_eq!(bytecode.len(), 67);
+    }
 }

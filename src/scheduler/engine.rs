@@ -266,7 +266,7 @@ impl ClusterScheduler {
 
         if is_unmetered {
             // First priority: dispatch any pending unassigned tasks
-            for (_, record) in inner.tasks.iter_mut() {
+            for record in inner.tasks.values_mut() {
                 if record.state == TaskState::Pending {
                     if !is_rooted && record.spec.engine == ExecutionEngine::RootShell as i32 {
                         continue;
@@ -284,7 +284,7 @@ impl ClusterScheduler {
             // Second priority: [INV-005] Speculative Dual-Assignment
             // If Wi-Fi worker has capacity, preempt slow cellular spot worker
             if desired_tasks.is_empty() {
-                for (_, record) in inner.tasks.iter_mut() {
+                for record in inner.tasks.values_mut() {
                     if record.state == TaskState::Leased
                         && record.assigned_node_id.as_deref() != Some(node_id)
                     {

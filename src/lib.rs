@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! AndroGrid Control Plane Core Library
 //!
 //! Exposes generated Protocol Buffer models, Tonic service definitions,

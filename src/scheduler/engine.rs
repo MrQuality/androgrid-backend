@@ -266,7 +266,7 @@ impl ClusterScheduler {
 
         if is_unmetered {
             // First priority: dispatch any pending unassigned tasks
-            for (_, record) in inner.tasks.iter_mut() {
+            for record in inner.tasks.values_mut() {
                 if record.state == TaskState::Pending {
                     if !is_rooted && record.spec.engine == ExecutionEngine::RootShell as i32 {
                         continue;
@@ -284,7 +284,7 @@ impl ClusterScheduler {
             // Second priority: [INV-005] Speculative Dual-Assignment
             // If Wi-Fi worker has capacity, preempt slow cellular spot worker
             if desired_tasks.is_empty() {
-                for (_, record) in inner.tasks.iter_mut() {
+                for record in inner.tasks.values_mut() {
                     if record.state == TaskState::Leased
                         && record.assigned_node_id.as_deref() != Some(node_id)
                     {
@@ -409,6 +409,69 @@ impl ClusterScheduler {
         }
 
         expired
+    }
+
+    /// Lists all registered worker nodes, their capabilities, and last heartbeat timestamps.
+    ///
+    /// Traces to: [REQ-OP-001], [REQ-OP-004]
+    pub fn list_worker_nodes(&self) -> Vec<crate::WorkerNodeInfo> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        inner
+            .workers
+            .iter()
+            .map(|(node_id, worker)| crate::WorkerNodeInfo {
+                node_id: node_id.clone(),
+                capabilities: Some(worker.capabilities.clone()),
+                client_version: worker.client_version.clone(),
+                last_heartbeat_epoch_seconds: worker.last_seen_epoch_ms / 1000,
+            })
+            .collect()
+    }
+
+    /// Cancels a task if it is not already in a terminal state.
+    ///
+    /// Traces to: [REQ-OP-004], Section 6.2 State Machine
+    pub fn cancel_task(&self, task_id: &str) -> Result<(), SchedulingError> {
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        let task = inner
+            .tasks
+            .get_mut(task_id)
+            .ok_or_else(|| SchedulingError::TaskNotFound(task_id.to_string()))?;
+
+        if task.state == TaskState::Completed
+            || task.state == TaskState::Failed
+            || task.state == TaskState::TimedOut
+        {
+            return Err(SchedulingError::AlreadyFinalized(task_id.to_string()));
+        }
+
+        task.state = TaskState::Failed;
+        task.result = Some(TaskExecutionResult {
+            exit_code: -1,
+            stdout_bytes: Vec::new(),
+            stderr_bytes: b"Task cancelled by operator".to_vec(),
+            error_code: "TASK_CANCELLED".to_string(),
+            error_message: "Task was cancelled by operator".to_string(),
+            execution_duration_ms: 0,
+            committed_by_node_id: "operator".to_string(),
+            committed_attempt: task.active_attempt,
+        });
+
+        Ok(())
+    }
+
+    /// Retrieves complete task lifecycle status and execution outputs.
+    ///
+    /// Traces to: [REQ-OP-004]
+    pub fn get_task_details(
+        &self,
+        task_id: &str,
+    ) -> Option<(TaskState, u32, Option<TaskExecutionResult>)> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        inner
+            .tasks
+            .get(task_id)
+            .map(|t| (t.state, t.active_attempt, t.result.clone()))
     }
 }
 

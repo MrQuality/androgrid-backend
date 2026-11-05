@@ -19,8 +19,8 @@ jobs:
       - name: Checkout Codebase
         uses: actions/checkout@v4
 
-      - name: Install Rust 1.82 Toolchain
-        uses: dtolnay/rust-toolchain@1.82
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
 

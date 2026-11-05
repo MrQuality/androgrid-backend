@@ -10,9 +10,11 @@ use tokio::signal;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 
+use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::{
-    build_server_mtls_config, AndroGridServiceImpl, ClusterConfig, ClusterScheduler,
+    build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ClusterConfig,
+    ClusterScheduler,
 };
 
 #[tokio::main]
@@ -49,6 +51,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .max_decoding_message_size(config.max_frame_size_bytes)
         .max_encoding_message_size(config.max_frame_size_bytes);
 
+    let admin_service = AdminServiceImpl::new(Arc::clone(&scheduler));
+    let admin_server = AdminServiceServer::new(admin_service)
+        .max_decoding_message_size(config.max_frame_size_bytes)
+        .max_encoding_message_size(config.max_frame_size_bytes);
+
     let mut server_builder = Server::builder();
 
     if config.is_mtls_configured() {
@@ -81,6 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     server_builder
         .add_service(service_server)
+        .add_service(admin_server)
         .serve_with_shutdown(config.listen_addr, shutdown_signal)
         .await?;
 

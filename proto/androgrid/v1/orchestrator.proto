@@ -24,6 +24,24 @@ service AndroGridService {
   rpc SubmitCellularResult(SubmitCellularResultRequest) returns (SubmitCellularResultResponse);
 }
 
+// AdminService provides administrative control, task submission, and cluster observability
+// for human operators and external pipeline automation.
+// Traces to: [REQ-OP-001], [REQ-OP-004], [INV-002], [NFR-SEC-001]
+service AdminService {
+  // Enqueue a compute task into the cluster scheduling queue.
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+
+  // Retrieve current execution status, exit code, and outputs for a task.
+  rpc GetTaskStatus(GetTaskStatusRequest) returns (GetTaskStatusResponse);
+
+  // List all registered worker nodes, their hardware capabilities, and connection states.
+  rpc ListWorkerNodes(ListWorkerNodesRequest) returns (ListWorkerNodesResponse);
+
+  // Cancel an active or pending task.
+  rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+}
+
+
 // Active network interface type reported by worker node.
 enum NetworkTransportType {
   NETWORK_TRANSPORT_UNSPECIFIED = 0;
@@ -160,4 +178,62 @@ message SyncNodeStateResponse {
   repeated TaskSpec desired_tasks = 2;
   repeated string cancel_task_ids = 3;
   repeated string acknowledged_task_ids = 4;
+}
+
+
+// Request to enqueue a compute task.
+message SubmitTaskRequest {
+  TaskSpec task = 1;
+}
+
+// Response acknowledging task submission.
+message SubmitTaskResponse {
+  bool accepted = 1;
+  string task_id = 2;
+  string message = 3;
+}
+
+// Request for task execution status.
+message GetTaskStatusRequest {
+  string task_id = 1;
+}
+
+// Response detailing task lifecycle state and output artifacts.
+message GetTaskStatusResponse {
+  string task_id = 1;
+  TaskState state = 2;
+  uint32 active_attempt = 3;
+  int32 exit_code = 4;
+  bytes stdout_bytes = 5;
+  bytes stderr_bytes = 6;
+  string error_code = 7;
+  string error_message = 8;
+  uint64 execution_duration_ms = 9;
+}
+
+// Request to list registered worker nodes.
+message ListWorkerNodesRequest {}
+
+// Information snapshot for a registered worker node.
+message WorkerNodeInfo {
+  string node_id = 1;
+  NodeCapabilities capabilities = 2;
+  string client_version = 3;
+  uint64 last_heartbeat_epoch_seconds = 4;
+}
+
+// Response containing all registered worker nodes.
+message ListWorkerNodesResponse {
+  repeated WorkerNodeInfo nodes = 1;
+}
+
+// Request to cancel a scheduled or running task.
+message CancelTaskRequest {
+  string task_id = 1;
+}
+
+// Response acknowledging task cancellation.
+message CancelTaskResponse {
+  bool cancelled = 1;
+  string message = 2;
 }

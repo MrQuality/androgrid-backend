@@ -14,6 +14,7 @@ DAYS_VALID=1825 # 5 years for internal root CA
 CLIENT_DAYS_VALID=365 # 1 year for worker nodes
 NODE_ID="${2:-node_worker_01}"
 P12_PASSWORD="${3:-androgrid_secure_pki}"
+ADDITIONAL_SAN="${4:-}"
 
 echo "=========================================================="
 echo "AndroGrid Cluster mTLS 1.3 PKI Generation"
@@ -57,9 +58,19 @@ subjectAltName = @alt_names
 [alt_names]
 DNS.1 = localhost
 DNS.2 = grpc.cluster.domain.com
+DNS.3 = host.docker.internal
 IP.1 = 127.0.0.1
 IP.2 = 0.0.0.0
+IP.3 = 10.0.2.2
 EOF
+
+if [ -n "${ADDITIONAL_SAN}" ]; then
+    if echo "${ADDITIONAL_SAN}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then
+        echo "IP.4 = ${ADDITIONAL_SAN}" >> "${OUTPUT_DIR}/server_ext.cnf"
+    else
+        echo "DNS.4 = ${ADDITIONAL_SAN}" >> "${OUTPUT_DIR}/server_ext.cnf"
+    fi
+fi
 
 openssl x509 -req -in "${OUTPUT_DIR}/server.csr" \
     -CA "${OUTPUT_DIR}/ca.crt" -CAkey "${OUTPUT_DIR}/ca.key" -CAcreateserial \
@@ -100,6 +111,24 @@ openssl pkcs12 -export \
     -out "${OUTPUT_DIR}/client.p12" \
     -name "${NODE_ID}" \
     -password "pass:${P12_PASSWORD}"
+
+# 5. Generate Rogue Untrusted Client Certificate for [INV-002] Verification
+echo "[+] Generating Rogue CA and Untrusted Client Certificate for [INV-002] mTLS verification..."
+openssl ecparam -name prime256v1 -genkey -noout -out "${OUTPUT_DIR}/untrusted_ca.key"
+chmod 600 "${OUTPUT_DIR}/untrusted_ca.key"
+openssl req -new -x509 -sha256 -key "${OUTPUT_DIR}/untrusted_ca.key" \
+    -out "${OUTPUT_DIR}/untrusted_ca.crt" -days 30 \
+    -subj "/CN=Untrusted Rogue CA/O=Rogue Cluster/OU=Testing"
+
+openssl ecparam -name prime256v1 -genkey -noout -out "${OUTPUT_DIR}/untrusted_client.key"
+chmod 600 "${OUTPUT_DIR}/untrusted_client.key"
+openssl req -new -key "${OUTPUT_DIR}/untrusted_client.key" \
+    -out "${OUTPUT_DIR}/untrusted_client.csr" \
+    -subj "/CN=untrusted_worker/O=Rogue Worker/OU=Edge Compute"
+openssl x509 -req -in "${OUTPUT_DIR}/untrusted_client.csr" \
+    -CA "${OUTPUT_DIR}/untrusted_ca.crt" -CAkey "${OUTPUT_DIR}/untrusted_ca.key" -CAcreateserial \
+    -out "${OUTPUT_DIR}/untrusted_client.crt" -days 30 -sha256
+rm -f "${OUTPUT_DIR}/untrusted_client.csr"
 
 echo "=========================================================="
 echo "PKI Generation Complete!"

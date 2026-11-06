@@ -47,3 +47,7 @@ _agent/
 .claude/
 .cursor/
 .vscode/
+
+# Python cache artifacts
+__pycache__/
+*.py[cod]

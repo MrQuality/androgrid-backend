@@ -40,9 +40,13 @@ fn spike_claim_cellular_task_request_wire_parity() {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 31,
+            thermal_status: 1,
         }),
         battery_level_pct: 78,
         is_charging: false,
+        battery_temperature_celsius: 31,
+        thermal_status: 1,
     };
 
     let start_encode = Instant::now();
@@ -69,6 +73,8 @@ fn spike_claim_cellular_task_request_wire_parity() {
     assert_eq!(decoded_req.node_id, original_req.node_id);
     assert_eq!(decoded_req.battery_level_pct, 78);
     assert!(!decoded_req.is_charging);
+    assert_eq!(decoded_req.battery_temperature_celsius, 31);
+    assert_eq!(decoded_req.thermal_status, 1);
 
     let caps = decoded_req
         .capabilities
@@ -84,6 +90,8 @@ fn spike_claim_cellular_task_request_wire_parity() {
         NetworkTransportType::NetworkTransportCellularWan as i32
     );
     assert_eq!(caps.max_cellular_task_duration_seconds, 180);
+    assert_eq!(caps.battery_temperature_celsius, 31);
+    assert_eq!(caps.thermal_status, 1);
     assert_eq!(
         caps.supported_engines,
         vec![
@@ -164,6 +172,7 @@ fn spike_task_spec_wasm_bytecode_payload_bounds() {
         artifact_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
             .to_string(),
         requires_unmetered: false,
+        artifact_url: "https://cdn.androgrid.net/wasm/task_501.wasm".to_string(),
     };
 
     let response = ClaimCellularTaskResponse {
@@ -186,6 +195,10 @@ fn spike_task_spec_wasm_bytecode_payload_bounds() {
     assert!(decoded.task_available);
     let decoded_task = decoded.task.expect("Task must be present");
     assert_eq!(decoded_task.task_id, "task_501");
+    assert_eq!(
+        decoded_task.artifact_url,
+        "https://cdn.androgrid.net/wasm/task_501.wasm"
+    );
     assert_eq!(decoded_task.wasm_bytecode.len(), 1024 * 1024);
     assert_eq!(
         decoded_task.wasm_bytecode[0..8],

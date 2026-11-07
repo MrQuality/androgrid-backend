@@ -78,6 +78,21 @@ impl From<SchedulingError> for Status {
                     task_id, from, to
                 ))
             }
+
+            // Traces to: [NFR-POW-001], [REQ-OP-003]
+            SchedulingError::ThermalThrottled {
+                node_id,
+                temperature_celsius,
+                thermal_status,
+            } => Status::resource_exhausted(format!(
+                "THERMAL_THROTTLED: node '{}' is thermally throttled (temp: {}C, status: {})",
+                node_id, temperature_celsius, thermal_status
+            )),
+
+            // Traces to: [INV-006]
+            SchedulingError::RootShellExecutionDisabled => Status::permission_denied(
+                "ROOT_SHELL_DISABLED: root shell execution is disabled; start orchestrator with --allow-insecure-root-tasks to enable",
+            ),
         }
     }
 }

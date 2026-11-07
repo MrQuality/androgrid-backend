@@ -7,6 +7,7 @@
 pub mod engine;
 pub mod errors;
 pub mod state;
+pub mod thermal;
 
 pub use engine::{
     ClusterScheduler, DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_NODE_LEASE_TIMEOUT_SECONDS,
@@ -14,3 +15,4 @@ pub use engine::{
 };
 pub use errors::SchedulingError;
 pub use state::{TaskExecutionResult, TaskRecord, WorkerRecord};
+pub use thermal::{ThermalAction, ThermalPolicy};

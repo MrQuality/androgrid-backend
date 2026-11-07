@@ -5,6 +5,7 @@
 //!
 //! Traces to: AG-SPEC-2026-V2 Section 2.2, Section 2.3, [INV-002], [NFR-SEC-001], [NFR-PERF-001]
 
+use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
 use tonic::transport::Server;
@@ -14,11 +15,25 @@ use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::{
     build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ClusterConfig,
-    ClusterScheduler,
+    ClusterScheduler, ThermalPolicy,
 };
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "androgrid-backend",
+    about = "AndroGrid Control Plane Orchestrator",
+    version = "0.1.0"
+)]
+struct ServerArgs {
+    /// Allow scheduling of insecure root shell tasks (diagnostic / laboratory mode)
+    #[arg(long, env = "ANDROGRID_ALLOW_INSECURE_ROOT_TASKS")]
+    allow_insecure_root_tasks: bool,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = ServerArgs::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -28,7 +43,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Initializing AndroGrid Control Plane...");
 
-    let config = match ClusterConfig::from_env() {
+    let mut config = match ClusterConfig::from_env() {
         Ok(c) => c,
         Err(e) => {
             error!("Configuration error: {e}");
@@ -36,15 +51,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    if args.allow_insecure_root_tasks {
+        config.allow_insecure_root_tasks = true;
+    }
+
+    if config.allow_insecure_root_tasks {
+        warn!("Insecure root shell execution explicitly ENABLED via --allow-insecure-root-tasks [DIAGNOSTIC MODE]");
+    }
+
     info!(
         listen_addr = %config.listen_addr,
         heartbeat_secs = config.heartbeat_interval_seconds,
         lease_secs = config.lease_timeout_seconds,
         max_frame_mb = config.max_frame_size_bytes / (1024 * 1024),
+        allow_insecure_root = config.allow_insecure_root_tasks,
         "Cluster configuration loaded"
     );
 
-    let scheduler = Arc::new(ClusterScheduler::new());
+    let scheduler = Arc::new(ClusterScheduler::with_options(
+        config.allow_insecure_root_tasks,
+        ThermalPolicy::default(),
+    ));
 
     let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
     let service_server = AndroGridServiceServer::new(service)

@@ -89,7 +89,7 @@ impl AndroGridService for AndroGridServiceImpl {
 
     /// Disconnected unary task claim over cellular WAN.
     ///
-    /// Traces to: [REQ-OP-003], [INV-003], [INV-005], [ANTI-003]
+    /// Traces to: [REQ-OP-003], [INV-003], [INV-005], [ANTI-003], [NFR-POW-001]
     async fn claim_cellular_task(
         &self,
         request: Request<ClaimCellularTaskRequest>,
@@ -101,6 +101,8 @@ impl AndroGridService for AndroGridServiceImpl {
             &req.node_id,
             req.battery_level_pct,
             req.is_charging,
+            req.battery_temperature_celsius,
+            req.thermal_status,
             now_s,
         )?;
 

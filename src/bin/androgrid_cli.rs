@@ -82,6 +82,10 @@ enum Commands {
         #[arg(long)]
         requires_unmetered: bool,
 
+        /// Decoupled artifact download URL for pre-cached distribution
+        #[arg(long)]
+        artifact_url: Option<String>,
+
         /// Environment variables in KEY=VALUE format
         #[arg(long, value_parser = parse_key_val)]
         env: Vec<(String, String)>,
@@ -140,7 +144,23 @@ struct WorkerNodeOutput {
     is_rooted: bool,
     is_metered: bool,
     transport: String,
+    battery_temperature_celsius: i32,
+    thermal_status: String,
     client_version: String,
+}
+
+/// Maps integer thermal status to Android PowerManager thermal status badge string.
+fn thermal_status_badge(status: u32) -> &'static str {
+    match status {
+        0 => "NONE",
+        1 => "LIGHT",
+        2 => "MODERATE",
+        3 => "SEVERE",
+        4 => "CRITICAL",
+        5 => "EMERGENCY",
+        6 => "SHUTDOWN",
+        _ => "UNKNOWN",
+    }
 }
 
 #[derive(Serialize)]
@@ -218,6 +238,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             root,
             timeout,
             requires_unmetered,
+            artifact_url,
             env,
         } => {
             let actual_task_id = task_id.unwrap_or_else(|| {
@@ -270,6 +291,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 shell_command,
                 artifact_sha256,
                 requires_unmetered,
+                artifact_url: artifact_url.unwrap_or_default(),
             };
 
             let response = client
@@ -356,6 +378,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     2 => "Cellular WAN",
                     _ => "Unknown",
                 };
+                let thermal_badge = thermal_status_badge(caps.thermal_status);
                 node_outputs.push(WorkerNodeOutput {
                     node_id: node.node_id,
                     cpu_cores: caps.cpu_cores,
@@ -365,6 +388,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     is_rooted: caps.is_rooted,
                     is_metered: caps.is_metered,
                     transport: transport.to_string(),
+                    battery_temperature_celsius: caps.battery_temperature_celsius,
+                    thermal_status: thermal_badge.to_string(),
                     client_version: node.client_version,
                 });
             }
@@ -377,19 +402,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  (No worker nodes currently registered)");
                 } else {
                     println!(
-                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<14}",
-                        "NODE ID", "CORES", "RAM (MB)", "OS VERSION", "ABI", "ROOTED", "TRANSPORT"
+                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
+                        "NODE ID",
+                        "CORES",
+                        "RAM (MB)",
+                        "OS VERSION",
+                        "ABI",
+                        "ROOTED",
+                        "TEMP (°C)",
+                        "THERMAL",
+                        "TRANSPORT"
                     );
-                    println!("{}", "-".repeat(86));
+                    println!("{}", "-".repeat(108));
                     for n in node_outputs {
+                        let temp_str = if n.battery_temperature_celsius <= 0 {
+                            "N/A".to_string()
+                        } else {
+                            format!("{}°C", n.battery_temperature_celsius)
+                        };
                         println!(
-                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<14}",
+                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
                             n.node_id,
                             n.cpu_cores,
                             n.ram_mb,
                             n.os_version,
                             n.abi,
                             if n.is_rooted { "YES" } else { "NO" },
+                            temp_str,
+                            n.thermal_status,
                             n.transport
                         );
                     }
@@ -464,6 +504,18 @@ mod tests {
             "TIMED_OUT"
         );
         assert_eq!(task_state_to_string(999), "UNSPECIFIED");
+    }
+
+    #[test]
+    fn test_thermal_status_badge_mappings() {
+        assert_eq!(thermal_status_badge(0), "NONE");
+        assert_eq!(thermal_status_badge(1), "LIGHT");
+        assert_eq!(thermal_status_badge(2), "MODERATE");
+        assert_eq!(thermal_status_badge(3), "SEVERE");
+        assert_eq!(thermal_status_badge(4), "CRITICAL");
+        assert_eq!(thermal_status_badge(5), "EMERGENCY");
+        assert_eq!(thermal_status_badge(6), "SHUTDOWN");
+        assert_eq!(thermal_status_badge(99), "UNKNOWN");
     }
 
     #[test]

@@ -54,7 +54,7 @@ enum NetworkTransportType {
 enum ExecutionEngine {
   EXECUTION_ENGINE_UNSPECIFIED = 0;
   EXECUTION_ENGINE_WASM_WASI = 1;
-  EXECUTION_ENGINE_ROOT_SHELL = 2;
+  EXECUTION_ENGINE_ROOT_SHELL = 2 [deprecated = true];
   EXECUTION_ENGINE_TOYBOX_USER = 3;
 }
 
@@ -71,7 +71,7 @@ enum TaskState {
 }
 
 // Hardware and platform capabilities reported by worker node.
-// Traces to: [REQ-VER-002], [INV-006]
+// Traces to: [REQ-VER-002], [INV-006], [REQ-OP-003]
 message NodeCapabilities {
   bool is_rooted = 1;
   repeated ExecutionEngine supported_engines = 2;
@@ -82,6 +82,8 @@ message NodeCapabilities {
   bool is_metered = 7;
   NetworkTransportType current_transport = 8;
   uint32 max_cellular_task_duration_seconds = 9; // Max duration constraint (e.g., 180s per [INV-005])
+  int32 battery_temperature_celsius = 10;
+  uint32 thermal_status = 11; // Maps to Android PowerManager.THERMAL_STATUS_*
 }
 
 // Execution specification for an assigned compute task.
@@ -97,6 +99,7 @@ message TaskSpec {
   string shell_command = 8;
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
+  string artifact_url = 11;
 }
 
 // Unary request to claim a spot task over cellular WAN.
@@ -106,6 +109,8 @@ message ClaimCellularTaskRequest {
   NodeCapabilities capabilities = 2;
   uint32 battery_level_pct = 3;
   bool is_charging = 4;
+  int32 battery_temperature_celsius = 5;
+  uint32 thermal_status = 6; // Maps to Android PowerManager.THERMAL_STATUS_*
 }
 
 // Response granting a cellular spot lease.

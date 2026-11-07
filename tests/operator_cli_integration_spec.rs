@@ -163,6 +163,7 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         shell_command: String::new(),
         artifact_sha256: "b45a...".to_string(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
 
     let submit_res = admin_client
@@ -197,6 +198,8 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         is_metered: true,
         current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
         max_cellular_task_duration_seconds: 180,
+        battery_temperature_celsius: 29,
+        thermal_status: 0,
     };
 
     let reg_res = worker_client
@@ -221,6 +224,8 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
     let reported_caps = nodes_updated.nodes[0].capabilities.as_ref().unwrap();
     assert_eq!(reported_caps.cpu_cores, 8);
     assert_eq!(reported_caps.abi, "arm64-v8a");
+    assert_eq!(reported_caps.battery_temperature_celsius, 29);
+    assert_eq!(reported_caps.thermal_status, 0);
 
     // 6. Worker Claims Task over Cellular WAN
     let claim_res = worker_client
@@ -229,6 +234,8 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
             capabilities: Some(worker_caps),
             battery_level_pct: 80,
             is_charging: false,
+            battery_temperature_celsius: 29,
+            thermal_status: 0,
         })
         .await
         .expect("Claim cellular task should succeed")
@@ -286,6 +293,7 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         shell_command: String::new(),
         artifact_sha256: "c12d...".to_string(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
 
     admin_client
@@ -368,6 +376,8 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
         is_metered: false,
         current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
         max_cellular_task_duration_seconds: 180,
+        battery_temperature_celsius: 0,
+        thermal_status: 0,
     };
 
     let reg_req = RegisterNodeRequest {
@@ -447,6 +457,7 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
             shell_command: String::new(),
             artifact_sha256: computed_sha,
             requires_unmetered: false,
+            artifact_url: String::new(),
         };
 
         // Submit task via AdminService
@@ -466,6 +477,8 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
                 capabilities: Some(worker_caps.clone()),
                 battery_level_pct: 85,
                 is_charging: true,
+                battery_temperature_celsius: 0,
+                thermal_status: 0,
             })
             .await
             .expect("Worker should successfully claim task")

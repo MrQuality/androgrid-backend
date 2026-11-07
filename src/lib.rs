@@ -77,11 +77,15 @@ mod tests {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 28,
+            thermal_status: 0,
         };
 
         assert_eq!(caps.cpu_cores, 8);
         assert!(caps.is_metered);
         assert_eq!(caps.max_cellular_task_duration_seconds, 180);
+        assert_eq!(caps.battery_temperature_celsius, 28);
+        assert_eq!(caps.thermal_status, 0);
     }
 
     #[test]
@@ -98,9 +102,13 @@ mod tests {
                 is_metered: true,
                 current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
                 max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 31,
+                thermal_status: 1,
             }),
             battery_level_pct: 85,
             is_charging: false,
+            battery_temperature_celsius: 31,
+            thermal_status: 1,
         };
 
         let mut buf = Vec::new();
@@ -112,9 +120,13 @@ mod tests {
 
         assert_eq!(decoded.node_id, "worker-node-alpha");
         assert_eq!(decoded.battery_level_pct, 85);
+        assert_eq!(decoded.battery_temperature_celsius, 31);
+        assert_eq!(decoded.thermal_status, 1);
         let decoded_caps = decoded.capabilities.expect("Capabilities must be present");
         assert_eq!(decoded_caps.abi, "arm64-v8a");
         assert_eq!(decoded_caps.os_version, "14");
+        assert_eq!(decoded_caps.battery_temperature_celsius, 31);
+        assert_eq!(decoded_caps.thermal_status, 1);
     }
 
     #[test]

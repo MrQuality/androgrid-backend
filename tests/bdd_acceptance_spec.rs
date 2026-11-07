@@ -171,6 +171,7 @@ async fn test_bdd_scenario_1_cellular_disconnected_execution_and_zero_keepalive(
         shell_command: String::new(),
         artifact_sha256: String::new(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
     harness.scheduler.submit_task(task_501).unwrap();
 
@@ -188,6 +189,8 @@ async fn test_bdd_scenario_1_cellular_disconnected_execution_and_zero_keepalive(
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         client_version: "0.1.0".to_string(),
     };
@@ -209,9 +212,13 @@ async fn test_bdd_scenario_1_cellular_disconnected_execution_and_zero_keepalive(
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         battery_level_pct: 85,
         is_charging: false,
+        battery_temperature_celsius: 0,
+        thermal_status: 0,
     };
 
     let claim_res = client
@@ -291,6 +298,7 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
         shell_command: String::new(),
         artifact_sha256: String::new(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
     harness.scheduler.submit_task(task_601).unwrap();
 
@@ -309,6 +317,8 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
                 is_metered: true,
                 current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
                 max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 0,
+                thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
         })
@@ -328,9 +338,13 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         battery_level_pct: 75,
         is_charging: false,
+        battery_temperature_celsius: 0,
+        thermal_status: 0,
     };
 
     let cell_claim_res = cell_client
@@ -363,6 +377,8 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
                 is_metered: false,
                 current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
                 max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 0,
+                thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
         })
@@ -472,6 +488,8 @@ async fn test_bdd_scenario_3_sandbox_isolation_guard_for_unrooted_nodes() {
             is_metered: false,
             current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         client_version: "0.1.0".to_string(),
     };
@@ -511,6 +529,7 @@ async fn test_bdd_scenario_3_sandbox_isolation_guard_for_unrooted_nodes() {
         shell_command: "cat /proc/kallsyms".to_string(),
         artifact_sha256: String::new(),
         requires_unmetered: true,
+        artifact_url: String::new(),
     };
     harness.scheduler.submit_task(privileged_task).unwrap();
 
@@ -530,5 +549,145 @@ async fn test_bdd_scenario_3_sandbox_isolation_guard_for_unrooted_nodes() {
     assert!(
         sync_res.desired_tasks.is_empty(),
         "Orchestrator must NEVER dispatch EXECUTION_ENGINE_ROOT_SHELL to an unrooted node"
+    );
+}
+
+// ============================================================================
+// Section 8 Acceptance Scenario 4: Thermal-Aware Task Scheduling & Battery Protection
+// ============================================================================
+// Feature: Thermal-Aware Task Scheduling & Battery Protection
+// Scenario: Overheated cellular node is deferred until cooled below thermal threshold
+// Given the worker is connected to cellular network
+// And battery temperature exceeds 38 degrees Celsius or thermal status >= 3
+// When the worker calls "ClaimCellularTask"
+// Then the orchestrator defers task assignment returning task_available = false
+// And the mobile app immediately closes the gRPC channel
+// When the device cools below 38 degrees Celsius and thermal status is nominal
+// And the worker calls "ClaimCellularTask"
+// Then the orchestrator leases the task with run_attempt 1
+// ============================================================================
+#[tokio::test]
+async fn test_bdd_scenario_4_thermal_aware_task_scheduling_and_battery_protection() {
+    let harness = BddClusterHarness::start().await;
+
+    // Given: task_thermal_401 enqueued in the orchestrator pool (120s timeout, requires_unmetered = false)
+    let task_spec = TaskSpec {
+        task_id: "task_thermal_401".to_string(),
+        run_attempt: 0,
+        engine: ExecutionEngine::WasmWasi as i32,
+        timeout_seconds: 120,
+        entrypoint: "_start".to_string(),
+        env_vars: HashMap::new(),
+        wasm_bytecode: vec![0x00, 0x61, 0x73, 0x6d],
+        shell_command: String::new(),
+        artifact_sha256: "sha256-thermal-401".to_string(),
+        requires_unmetered: false,
+        artifact_url: String::new(),
+    };
+    harness.scheduler.submit_task(task_spec).unwrap();
+
+    let mut client = harness.connect_client().await;
+    let reg_req = RegisterNodeRequest {
+        node_id: "cell_node_thermal_01".to_string(),
+        capabilities: Some(NodeCapabilities {
+            is_rooted: false,
+            supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+            cpu_cores: 8,
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            os_version: "14".to_string(),
+            abi: "arm64-v8a".to_string(),
+            is_metered: true,
+            current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
+            max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 42,
+            thermal_status: 1,
+        }),
+        client_version: "0.1.0".to_string(),
+    };
+    client
+        .register_node(reg_req)
+        .await
+        .expect("Registration must succeed");
+
+    // When: the worker calls "ClaimCellularTask" while overheated (42 deg C > 38 deg C)
+    let hot_claim_req = ClaimCellularTaskRequest {
+        node_id: "cell_node_thermal_01".to_string(),
+        capabilities: Some(NodeCapabilities {
+            is_rooted: false,
+            supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+            cpu_cores: 8,
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            os_version: "14".to_string(),
+            abi: "arm64-v8a".to_string(),
+            is_metered: true,
+            current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
+            max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 42,
+            thermal_status: 1,
+        }),
+        battery_level_pct: 85,
+        is_charging: false,
+        battery_temperature_celsius: 42,
+        thermal_status: 1,
+    };
+
+    let hot_claim_res = client
+        .claim_cellular_task(hot_claim_req)
+        .await
+        .expect("ClaimCellularTask RPC must succeed")
+        .into_inner();
+
+    // Then: the orchestrator defers task assignment (task_available = false)
+    assert!(
+        !hot_claim_res.task_available,
+        "Orchestrator must defer task assignment when battery temperature exceeds 38 deg C"
+    );
+    assert!(hot_claim_res.task.is_none());
+
+    // And: task remains PENDING in the cluster pool
+    assert_eq!(
+        harness.scheduler.get_task_state("task_thermal_401"),
+        Some(TaskState::Pending)
+    );
+
+    // When: device cools down below 38 deg C (32 deg C, thermal status NONE = 0)
+    let cool_claim_req = ClaimCellularTaskRequest {
+        node_id: "cell_node_thermal_01".to_string(),
+        capabilities: Some(NodeCapabilities {
+            is_rooted: false,
+            supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+            cpu_cores: 8,
+            total_ram_bytes: 8 * 1024 * 1024 * 1024,
+            os_version: "14".to_string(),
+            abi: "arm64-v8a".to_string(),
+            is_metered: true,
+            current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
+            max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 32,
+            thermal_status: 0,
+        }),
+        battery_level_pct: 85,
+        is_charging: false,
+        battery_temperature_celsius: 32,
+        thermal_status: 0,
+    };
+
+    let cool_claim_res = client
+        .claim_cellular_task(cool_claim_req)
+        .await
+        .expect("ClaimCellularTask RPC must succeed")
+        .into_inner();
+
+    // Then: the orchestrator leases the task with run_attempt 1
+    assert!(
+        cool_claim_res.task_available,
+        "Orchestrator must lease task once node has cooled to nominal temperature"
+    );
+    let leased_task = cool_claim_res.task.expect("Task spec must be present");
+    assert_eq!(leased_task.task_id, "task_thermal_401");
+    assert_eq!(leased_task.run_attempt, 1);
+    assert_eq!(
+        harness.scheduler.get_task_state("task_thermal_401"),
+        Some(TaskState::Leased)
     );
 }

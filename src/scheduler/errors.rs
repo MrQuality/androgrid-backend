@@ -52,4 +52,16 @@ pub enum SchedulingError {
 
     #[error("Node '{node_id}' has insufficient battery ({battery_pct}%) and is not charging")]
     InsufficientBattery { node_id: String, battery_pct: u32 },
+
+    /// Traces to: [NFR-POW-001], [REQ-OP-003]
+    #[error("Node '{node_id}' is thermally throttled (battery temp: {temperature_celsius}C, thermal status: {thermal_status})")]
+    ThermalThrottled {
+        node_id: String,
+        temperature_celsius: i32,
+        thermal_status: u32,
+    },
+
+    /// Traces to: [INV-006]
+    #[error("Execution of root shell tasks is disabled on this cluster without --allow-insecure-root-tasks")]
+    RootShellExecutionDisabled,
 }

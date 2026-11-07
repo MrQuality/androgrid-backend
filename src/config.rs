@@ -44,6 +44,17 @@ pub struct ClusterConfig {
     /// Whether scheduling of insecure root shell tasks is allowed (default: false).
     /// Traces to: [INV-006]
     pub allow_insecure_root_tasks: bool,
+
+    /// Socket address for HTTP static artifact server binding (default: 127.0.0.1:50052).
+    /// Traces to: [NFR-PERF-001], [REQ-OP-003]
+    pub artifact_listen_addr: SocketAddr,
+
+    /// Optional explicit base URL for worker artifact downloads (e.g. "http://127.0.0.1:50052").
+    /// Traces to: [NFR-PERF-001], [REQ-OP-003]
+    pub artifact_base_url: Option<String>,
+
+    /// Optional persistent directory on disk for cached WebAssembly artifacts.
+    pub artifact_storage_dir: Option<PathBuf>,
 }
 
 impl Default for ClusterConfig {
@@ -59,6 +70,11 @@ impl Default for ClusterConfig {
             lease_timeout_seconds: 10,
             max_frame_size_bytes: MAX_FRAME_SIZE_BYTES,
             allow_insecure_root_tasks: false,
+            artifact_listen_addr: "127.0.0.1:50052"
+                .parse()
+                .expect("Default artifact socket address must be valid"),
+            artifact_base_url: None,
+            artifact_storage_dir: None,
         }
     }
 }
@@ -115,7 +131,48 @@ impl ClusterConfig {
             config.allow_insecure_root_tasks = val.eq_ignore_ascii_case("true") || val == "1";
         }
 
+        if let Ok(val) = std::env::var("ANDROGRID_ARTIFACT_LISTEN_ADDR") {
+            config.artifact_listen_addr =
+                val.parse().map_err(|_| ConfigError::InvalidSocketAddr {
+                    var: "ANDROGRID_ARTIFACT_LISTEN_ADDR",
+                    val,
+                })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_ARTIFACT_BASE_URL") {
+            config.artifact_base_url = Some(val);
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_ARTIFACT_DIR") {
+            config.artifact_storage_dir = Some(PathBuf::from(val));
+        }
+
         Ok(config)
+    }
+
+    /// Resolves the base URL for worker artifact downloads.
+    ///
+    /// Traces to: [NFR-PERF-001], [REQ-OP-003]
+    pub fn resolve_artifact_base_url(&self) -> String {
+        if let Some(ref base) = self.artifact_base_url {
+            base.trim_end_matches('/').to_string()
+        } else {
+            format!("http://{}", self.artifact_listen_addr)
+        }
+    }
+
+    /// Formats the fully qualified content-addressed download URL for a SHA-256 hash.
+    ///
+    /// Traces to: [NFR-PERF-001], [REQ-OP-003]
+    pub fn format_artifact_url(&self, sha256_hex: &str) -> String {
+        let clean_sha = sha256_hex
+            .trim()
+            .trim_end_matches(".wasm")
+            .to_ascii_lowercase();
+        format!(
+            "{}/artifacts/{clean_sha}.wasm",
+            self.resolve_artifact_base_url()
+        )
     }
 
     /// Checks if full mutual TLS credentials are provided in configuration.

@@ -14,8 +14,8 @@ use tracing::{error, info, warn};
 use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::{
-    build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ClusterConfig,
-    ClusterScheduler, ThermalPolicy,
+    build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ArtifactServer,
+    ArtifactStore, ClusterConfig, ClusterScheduler, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]
@@ -73,15 +73,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ThermalPolicy::default(),
     ));
 
+    let artifact_store = if let Some(ref dir) = config.artifact_storage_dir {
+        Arc::new(ArtifactStore::with_directory(dir))
+    } else {
+        Arc::new(ArtifactStore::new())
+    };
+
+    let artifact_base_url = config.resolve_artifact_base_url();
+
     let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
     let service_server = AndroGridServiceServer::new(service)
         .max_decoding_message_size(config.max_frame_size_bytes)
         .max_encoding_message_size(config.max_frame_size_bytes);
 
-    let admin_service = AdminServiceImpl::new(Arc::clone(&scheduler));
+    let admin_service = AdminServiceImpl::with_artifact_store(
+        Arc::clone(&scheduler),
+        Arc::clone(&artifact_store),
+        artifact_base_url,
+    );
     let admin_server = AdminServiceServer::new(admin_service)
         .max_decoding_message_size(config.max_frame_size_bytes)
         .max_encoding_message_size(config.max_frame_size_bytes);
+
+    let (artifact_shutdown_tx, artifact_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let artifact_listener = tokio::net::TcpListener::bind(config.artifact_listen_addr).await?;
+    info!(
+        artifact_addr = %config.artifact_listen_addr,
+        "Starting embedded HTTP static artifact server [NFR-PERF-001], [REQ-OP-003]"
+    );
+    ArtifactServer::spawn(
+        artifact_listener,
+        Arc::clone(&artifact_store),
+        artifact_shutdown_rx,
+    );
 
     let mut server_builder = Server::builder();
 
@@ -106,11 +130,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Starting Tonic gRPC control plane service"
     );
 
-    let shutdown_signal = async {
+    let shutdown_signal = async move {
         signal::ctrl_c()
             .await
             .expect("Failed to install Ctrl+C signal handler");
         info!("Received shutdown signal. Draining connections and terminating server...");
+        let _ = artifact_shutdown_tx.send(());
     };
 
     server_builder

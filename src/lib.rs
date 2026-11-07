@@ -19,6 +19,9 @@ pub use proto::androgrid::v1::*;
 pub mod scheduler;
 pub use scheduler::*;
 
+pub mod artifact;
+pub use artifact::*;
+
 pub mod transport;
 pub use transport::*;
 

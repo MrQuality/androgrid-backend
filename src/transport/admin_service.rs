@@ -9,22 +9,45 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::admin_service_server::AdminService;
+use crate::artifact::ArtifactStore;
 use crate::scheduler::ClusterScheduler;
 use crate::{
     CancelTaskRequest, CancelTaskResponse, GetTaskStatusRequest, GetTaskStatusResponse,
     ListWorkerNodesRequest, ListWorkerNodesResponse, SubmitTaskRequest, SubmitTaskResponse,
+    UploadArtifactRequest, UploadArtifactResponse,
 };
 
 /// Production implementation of AdminService backed by atomic ClusterScheduler.
 #[derive(Debug, Clone)]
 pub struct AdminServiceImpl {
     scheduler: Arc<ClusterScheduler>,
+    artifact_store: Arc<ArtifactStore>,
+    artifact_base_url: String,
 }
 
 impl AdminServiceImpl {
     /// Constructs a new AdminServiceImpl with the shared cluster scheduler.
     pub fn new(scheduler: Arc<ClusterScheduler>) -> Self {
-        Self { scheduler }
+        Self {
+            scheduler,
+            artifact_store: Arc::new(ArtifactStore::new()),
+            artifact_base_url: "http://127.0.0.1:50052".to_string(),
+        }
+    }
+
+    /// Constructs an AdminServiceImpl with explicit artifact store and base URL injection.
+    ///
+    /// Traces to: [NFR-PERF-001], [REQ-OP-003]
+    pub fn with_artifact_store(
+        scheduler: Arc<ClusterScheduler>,
+        artifact_store: Arc<ArtifactStore>,
+        artifact_base_url: String,
+    ) -> Self {
+        Self {
+            scheduler,
+            artifact_store,
+            artifact_base_url,
+        }
     }
 }
 
@@ -143,6 +166,41 @@ impl AdminService for AdminServiceImpl {
                 format!("Task '{id}' is already finalized in a terminal state"),
             )),
             Err(e) => Err(Status::internal(format!("Failed to cancel task: {e}"))),
+        }
+    }
+
+    /// Uploads or registers a WebAssembly bytecode artifact for content-addressed distribution.
+    ///
+    /// Traces to: [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+    async fn upload_artifact(
+        &self,
+        request: Request<UploadArtifactRequest>,
+    ) -> Result<Response<UploadArtifactResponse>, Status> {
+        let req = request.into_inner();
+        let bytecode = req.bytecode;
+        if bytecode.is_empty() {
+            return Err(Status::invalid_argument(
+                "bytecode must not be empty in UploadArtifactRequest",
+            ));
+        }
+
+        match self
+            .artifact_store
+            .store_artifact_verified(&bytecode, &req.expected_sha256)
+        {
+            Ok(sha256) => {
+                let base = self.artifact_base_url.trim_end_matches('/');
+                let artifact_url = format!("{base}/artifacts/{sha256}.wasm");
+                Ok(Response::new(UploadArtifactResponse {
+                    success: true,
+                    artifact_sha256: sha256,
+                    artifact_url,
+                    message: "Artifact uploaded and indexed successfully".to_string(),
+                }))
+            }
+            Err(e) => Err(Status::invalid_argument(format!(
+                "Artifact storage or validation error: {e}"
+            ))),
         }
     }
 }

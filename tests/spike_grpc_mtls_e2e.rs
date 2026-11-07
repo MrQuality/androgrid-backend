@@ -182,6 +182,8 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         client_version: "1.0.0".to_string(),
     };
@@ -207,6 +209,7 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
         shell_command: String::new(),
         artifact_sha256: "sha256-test".to_string(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
     scheduler.submit_task(task_spec).unwrap();
 
@@ -223,9 +226,13 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }),
         battery_level_pct: 90,
         is_charging: false,
+        battery_temperature_celsius: 0,
+        thermal_status: 0,
     };
 
     let claim_res = client
@@ -253,6 +260,8 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
                 is_metered: false,
                 current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
                 max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 0,
+                thermal_status: 0,
             },
             "1.0.0".to_string(),
             1000,

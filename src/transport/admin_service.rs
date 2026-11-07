@@ -164,6 +164,7 @@ mod tests {
             shell_command: String::new(),
             artifact_sha256: "test_sha256".to_string(),
             requires_unmetered: false,
+            artifact_url: String::new(),
         }
     }
 
@@ -238,6 +239,8 @@ mod tests {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 32,
+            thermal_status: 1,
         };
 
         scheduler

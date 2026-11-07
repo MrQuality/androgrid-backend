@@ -40,6 +40,10 @@ pub struct ClusterConfig {
 
     /// Maximum allowable gRPC message frame payload in bytes (default: 16 MB).
     pub max_frame_size_bytes: usize,
+
+    /// Whether scheduling of insecure root shell tasks is allowed (default: false).
+    /// Traces to: [INV-006]
+    pub allow_insecure_root_tasks: bool,
 }
 
 impl Default for ClusterConfig {
@@ -54,6 +58,7 @@ impl Default for ClusterConfig {
             heartbeat_interval_seconds: 2,
             lease_timeout_seconds: 10,
             max_frame_size_bytes: MAX_FRAME_SIZE_BYTES,
+            allow_insecure_root_tasks: false,
         }
     }
 }
@@ -104,6 +109,10 @@ impl ClusterConfig {
                     var: "ANDROGRID_LEASE_TIMEOUT_SECS",
                     val,
                 })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_ALLOW_INSECURE_ROOT_TASKS") {
+            config.allow_insecure_root_tasks = val.eq_ignore_ascii_case("true") || val == "1";
         }
 
         Ok(config)

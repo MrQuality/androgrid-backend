@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 
 use crate::scheduler::errors::SchedulingError;
 use crate::scheduler::state::{TaskExecutionResult, TaskRecord, WorkerRecord};
+use crate::scheduler::thermal::{ThermalAction, ThermalPolicy};
 use crate::{
     ClaimCellularTaskResponse, ExecutionEngine, NetworkTransportType, NodeCapabilities,
     RegisterNodeResponse, SubmitCellularResultResponse, SyncNodeStateResponse, TaskExecutionReport,
@@ -39,14 +40,52 @@ pub struct ClusterScheduler {
 struct SchedulerInner {
     tasks: HashMap<String, TaskRecord>,
     workers: HashMap<String, WorkerRecord>,
+    allow_insecure_root_tasks: bool,
+    thermal_policy: ThermalPolicy,
 }
 
 impl ClusterScheduler {
-    /// Creates a new, empty cluster scheduler.
+    /// Creates a new cluster scheduler with default safety parameters.
     pub fn new() -> Self {
+        Self::with_options(false, ThermalPolicy::default())
+    }
+
+    /// Creates a cluster scheduler with explicit insecure root task permission and thermal policy.
+    ///
+    /// Traces to: [INV-006], [NFR-POW-001]
+    pub fn with_options(allow_insecure_root_tasks: bool, thermal_policy: ThermalPolicy) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(SchedulerInner::default())),
+            inner: Arc::new(RwLock::new(SchedulerInner {
+                tasks: HashMap::new(),
+                workers: HashMap::new(),
+                allow_insecure_root_tasks,
+                thermal_policy,
+            })),
         }
+    }
+
+    /// Returns whether scheduling of insecure root shell tasks is allowed.
+    pub fn allow_insecure_root_tasks(&self) -> bool {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        inner.allow_insecure_root_tasks
+    }
+
+    /// Configures permission for insecure root shell tasks.
+    pub fn set_allow_insecure_root_tasks(&self, allow: bool) {
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        inner.allow_insecure_root_tasks = allow;
+    }
+
+    /// Returns the active thermal policy.
+    pub fn thermal_policy(&self) -> ThermalPolicy {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        inner.thermal_policy
+    }
+
+    /// Updates the active thermal policy.
+    pub fn set_thermal_policy(&self, policy: ThermalPolicy) {
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        inner.thermal_policy = policy;
     }
 
     /// Registers an Android worker node, enforcing root capabilities and engine boundaries.
@@ -78,6 +117,9 @@ impl ClusterScheduler {
 
         let session_token = format!("session-{}-{}", node_id, now_epoch_ms);
 
+        let battery_temperature_celsius = capabilities.battery_temperature_celsius;
+        let thermal_status = capabilities.thermal_status;
+
         let worker = WorkerRecord {
             node_id: node_id.clone(),
             capabilities,
@@ -85,6 +127,8 @@ impl ClusterScheduler {
             client_version,
             battery_level_pct: 100,
             is_charging: true,
+            battery_temperature_celsius,
+            thermal_status,
             last_seen_epoch_ms: now_epoch_ms,
             active_task_ids: Vec::new(),
         };
@@ -106,19 +150,21 @@ impl ClusterScheduler {
         Ok(())
     }
 
-    /// Claims an eligible task for a cellular spot worker.
+    /// Claims an eligible task for a cellular spot worker with thermal protection.
     ///
-    /// Traces to: [REQ-OP-003], [INV-003], [INV-005], [INV-006], [ANTI-003]
+    /// Traces to: [REQ-OP-003], [INV-003], [INV-005], [INV-006], [ANTI-003], [NFR-POW-001]
     pub fn claim_cellular_task(
         &self,
         node_id: &str,
         battery_level_pct: u32,
         is_charging: bool,
+        battery_temperature_celsius: i32,
+        thermal_status: u32,
         now_epoch_s: u64,
     ) -> Result<ClaimCellularTaskResponse, SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
-        let is_rooted = {
+        let (is_rooted, policy, allow_root) = {
             let worker = inner
                 .workers
                 .get_mut(node_id)
@@ -134,8 +180,37 @@ impl ClusterScheduler {
 
             worker.battery_level_pct = battery_level_pct;
             worker.is_charging = is_charging;
-            worker.capabilities.is_rooted
+            worker.battery_temperature_celsius = battery_temperature_celsius;
+            worker.thermal_status = thermal_status;
+            worker.capabilities.battery_temperature_celsius = battery_temperature_celsius;
+            worker.capabilities.thermal_status = thermal_status;
+
+            (
+                worker.capabilities.is_rooted,
+                inner.thermal_policy,
+                inner.allow_insecure_root_tasks,
+            )
         };
+
+        // Enforce Thermal Policy Guard: if throttled, apply configured action
+        if policy.is_throttled(battery_temperature_celsius, thermal_status) {
+            match policy.action {
+                ThermalAction::Defer => {
+                    return Ok(ClaimCellularTaskResponse {
+                        task_available: false,
+                        task: None,
+                        deadline_epoch_seconds: 0,
+                    });
+                }
+                ThermalAction::Reject => {
+                    return Err(SchedulingError::ThermalThrottled {
+                        node_id: node_id.to_string(),
+                        temperature_celsius: battery_temperature_celsius,
+                        thermal_status,
+                    });
+                }
+            }
+        }
 
         // Find candidate pending task matching cellular constraints
         let mut candidate_id: Option<String> = None;
@@ -154,8 +229,12 @@ impl ClusterScheduler {
                 continue;
             }
 
-            // [INV-006]: Unrooted workers must never receive root shell payloads
-            if !is_rooted && record.spec.engine == ExecutionEngine::RootShell as i32 {
+            // [INV-006] and Insecure Root Guard:
+            // 1. Unrooted workers must never receive root shell payloads
+            // 2. Root tasks require explicit cluster flag allow_insecure_root_tasks
+            if record.spec.engine == ExecutionEngine::RootShell as i32
+                && (!is_rooted || !allow_root)
+            {
                 continue;
             }
 
@@ -199,9 +278,20 @@ impl ClusterScheduler {
         }
     }
 
+    /// Helper to claim cellular spot task with nominal/unreported thermal telemetry (0 deg C, status 0).
+    pub fn claim_cellular_task_nominal(
+        &self,
+        node_id: &str,
+        battery_level_pct: u32,
+        is_charging: bool,
+        now_epoch_s: u64,
+    ) -> Result<ClaimCellularTaskResponse, SchedulingError> {
+        self.claim_cellular_task(node_id, battery_level_pct, is_charging, 0, 0, now_epoch_s)
+    }
+
     /// Declarative Wi-Fi state synchronization and speculative preemption dispatcher.
     ///
-    /// Traces to: [REQ-OP-002], [INV-005], [INV-006]
+    /// Traces to: [REQ-OP-002], [INV-005], [INV-006], [NFR-POW-001]
     pub fn sync_node_state(
         &self,
         node_id: &str,
@@ -211,9 +301,9 @@ impl ClusterScheduler {
     ) -> Result<SyncNodeStateResponse, SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
-        let is_rooted;
-        let is_unmetered;
-        {
+        let (is_rooted, is_unmetered, is_throttled, allow_root) = {
+            let policy = inner.thermal_policy;
+            let allow_root = inner.allow_insecure_root_tasks;
             let worker = inner
                 .workers
                 .get_mut(node_id)
@@ -227,11 +317,21 @@ impl ClusterScheduler {
             }
 
             worker.last_seen_epoch_ms = now_epoch_ms;
-            is_rooted = worker.capabilities.is_rooted;
-            is_unmetered = !worker.capabilities.is_metered
+            let throttled = policy.is_throttled(
+                worker.capabilities.battery_temperature_celsius,
+                worker.capabilities.thermal_status,
+            );
+            let unmetered = !worker.capabilities.is_metered
                 || worker.capabilities.current_transport
                     == NetworkTransportType::NetworkTransportWifiLan as i32;
-        }
+
+            (
+                worker.capabilities.is_rooted,
+                unmetered,
+                throttled,
+                allow_root,
+            )
+        };
 
         let mut acknowledged_ids = Vec::new();
 
@@ -261,14 +361,16 @@ impl ClusterScheduler {
             }
         }
 
-        // Schedule new or preempted tasks for this Wi-Fi node
+        // Schedule new or preempted tasks for this Wi-Fi node (deferred if thermally throttled)
         let mut desired_tasks = Vec::new();
 
-        if is_unmetered {
+        if is_unmetered && !is_throttled {
             // First priority: dispatch any pending unassigned tasks
             for record in inner.tasks.values_mut() {
                 if record.state == TaskState::Pending {
-                    if !is_rooted && record.spec.engine == ExecutionEngine::RootShell as i32 {
+                    if record.spec.engine == ExecutionEngine::RootShell as i32
+                        && (!is_rooted || !allow_root)
+                    {
                         continue;
                     }
                     record.state = TaskState::Leased;
@@ -288,7 +390,9 @@ impl ClusterScheduler {
                     if record.state == TaskState::Leased
                         && record.assigned_node_id.as_deref() != Some(node_id)
                     {
-                        if !is_rooted && record.spec.engine == ExecutionEngine::RootShell as i32 {
+                        if record.spec.engine == ExecutionEngine::RootShell as i32
+                            && (!is_rooted || !allow_root)
+                        {
                             continue;
                         }
 
@@ -498,6 +602,8 @@ mod tests {
                 NetworkTransportType::NetworkTransportWifiLan as i32
             },
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         }
     }
 
@@ -518,6 +624,7 @@ mod tests {
             shell_command: String::new(),
             artifact_sha256: "dummy-sha256".to_string(),
             requires_unmetered,
+            artifact_url: String::new(),
         }
     }
 
@@ -572,7 +679,7 @@ mod tests {
         scheduler.submit_task(task_root).unwrap();
 
         let claim_res1 = scheduler
-            .claim_cellular_task("cell-01", 80, false, 2000)
+            .claim_cellular_task_nominal("cell-01", 80, false, 2000)
             .unwrap();
         assert!(
             !claim_res1.task_available,
@@ -584,7 +691,7 @@ mod tests {
         scheduler.submit_task(task_eligible).unwrap();
 
         let claim_res2 = scheduler
-            .claim_cellular_task("cell-01", 80, false, 2000)
+            .claim_cellular_task_nominal("cell-01", 80, false, 2000)
             .unwrap();
         assert!(claim_res2.task_available);
         let task = claim_res2.task.expect("Task must be returned");
@@ -621,7 +728,7 @@ mod tests {
 
         // Step 1: Claimed by cellular worker cell_01 with run_attempt 1
         let claim = scheduler
-            .claim_cellular_task("cell_01", 85, false, 1000)
+            .claim_cellular_task_nominal("cell_01", 85, false, 1000)
             .unwrap();
         assert!(claim.task_available);
         assert_eq!(
@@ -712,7 +819,7 @@ mod tests {
 
         // Claimed on cellular -> attempt 1
         scheduler
-            .claim_cellular_task("cell_01", 90, false, 1000)
+            .claim_cellular_task_nominal("cell_01", 90, false, 1000)
             .unwrap();
 
         // Preempted on Wi-Fi -> attempt 2
@@ -753,5 +860,186 @@ mod tests {
             scheduler.get_task_state("task_fence"),
             Some(TaskState::Preempted)
         );
+    }
+
+    /// Verifies thermal deferral when battery temperature exceeds 38 deg C or thermal status >= 3.
+    ///
+    /// Traces to: [REQ-OP-003], [NFR-POW-001]
+    #[test]
+    fn test_thermal_policy_cellular_claim_deferral() {
+        let scheduler = ClusterScheduler::new();
+        let cell_caps = make_test_capabilities(false, true);
+        scheduler
+            .register_node("cell_hot".to_string(), cell_caps, "1.0.0".to_string(), 1000)
+            .unwrap();
+
+        let task = make_test_task("task_spot_thermal", 120, false, ExecutionEngine::WasmWasi);
+        scheduler.submit_task(task).unwrap();
+
+        // 1. Temperature is 42 deg C (> 38 deg C threshold) -> Task claim must be deferred
+        let res_temp = scheduler
+            .claim_cellular_task("cell_hot", 85, false, 42, 0, 1000)
+            .expect("Claim RPC must succeed");
+        assert!(
+            !res_temp.task_available,
+            "Claim must be deferred when battery temperature exceeds 38 deg C"
+        );
+        assert_eq!(
+            scheduler.get_task_state("task_spot_thermal"),
+            Some(TaskState::Pending)
+        );
+
+        // 2. Temperature is nominal (35 deg C), but thermal status is 3 (SEVERE) -> Must be deferred
+        let res_status = scheduler
+            .claim_cellular_task("cell_hot", 85, false, 35, 3, 1010)
+            .expect("Claim RPC must succeed");
+        assert!(
+            !res_status.task_available,
+            "Claim must be deferred when thermal status is >= 3"
+        );
+        assert_eq!(
+            scheduler.get_task_state("task_spot_thermal"),
+            Some(TaskState::Pending)
+        );
+
+        // 3. Node cools down: temperature is 32 deg C, thermal status is 1 (LIGHT) -> Lease succeeds
+        let res_nominal = scheduler
+            .claim_cellular_task("cell_hot", 85, false, 32, 1, 1020)
+            .expect("Claim RPC must succeed");
+        assert!(
+            res_nominal.task_available,
+            "Claim must succeed once node cools below threshold"
+        );
+        assert_eq!(
+            scheduler.get_task_state("task_spot_thermal"),
+            Some(TaskState::Leased)
+        );
+    }
+
+    /// Verifies uncalibrated or zero battery temperature does not trigger false throttling.
+    ///
+    /// Traces to: [REQ-OP-003], [NFR-POW-001]
+    #[test]
+    fn test_thermal_policy_unreported_telemetry_tolerated() {
+        let scheduler = ClusterScheduler::new();
+        let cell_caps = make_test_capabilities(false, true);
+        scheduler
+            .register_node(
+                "cell_uncal".to_string(),
+                cell_caps,
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let task = make_test_task("task_uncal", 120, false, ExecutionEngine::WasmWasi);
+        scheduler.submit_task(task).unwrap();
+
+        // Temperature 0 and status 0 (nominal / unreported telemetry) -> Must be claimable
+        let res = scheduler
+            .claim_cellular_task("cell_uncal", 80, false, 0, 0, 1000)
+            .unwrap();
+        assert!(
+            res.task_available,
+            "Unreported temperature (0) must not cause false deferral"
+        );
+    }
+
+    /// Verifies thermal policy rejection action emits ThermalThrottled error.
+    ///
+    /// Traces to: [REQ-OP-003], [NFR-POW-001]
+    #[test]
+    fn test_thermal_policy_rejection_action() {
+        let scheduler =
+            ClusterScheduler::with_options(false, ThermalPolicy::new(38, 3, ThermalAction::Reject));
+        let cell_caps = make_test_capabilities(false, true);
+        scheduler
+            .register_node(
+                "cell_reject".to_string(),
+                cell_caps,
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let task = make_test_task("task_reject", 120, false, ExecutionEngine::WasmWasi);
+        scheduler.submit_task(task).unwrap();
+
+        let err = scheduler
+            .claim_cellular_task("cell_reject", 80, false, 44, 0, 1000)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            SchedulingError::ThermalThrottled {
+                node_id: "cell_reject".to_string(),
+                temperature_celsius: 44,
+                thermal_status: 0,
+            }
+        );
+    }
+
+    /// Verifies root shell tasks are refused without explicit cluster flag even on rooted nodes.
+    ///
+    /// Traces to: [INV-006]
+    #[test]
+    fn test_root_task_refused_without_cli_flag() {
+        let scheduler = ClusterScheduler::new(); // allow_insecure_root_tasks is false by default
+        assert!(!scheduler.allow_insecure_root_tasks());
+
+        let rooted_caps = make_test_capabilities(true, false);
+        let reg = scheduler
+            .register_node(
+                "rooted_node_01".to_string(),
+                rooted_caps,
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let root_task = make_test_task("root_task_01", 60, false, ExecutionEngine::RootShell);
+        scheduler.submit_task(root_task).unwrap();
+
+        // Wi-Fi sync should NOT dispatch the root task
+        let sync_res = scheduler
+            .sync_node_state("rooted_node_01", &reg.session_token, &[], 2000)
+            .unwrap();
+        assert!(
+            sync_res.desired_tasks.is_empty(),
+            "Root shell task must be refused when allow_insecure_root_tasks is false"
+        );
+    }
+
+    /// Verifies root shell tasks are allowed on rooted nodes when explicit cluster flag is set.
+    ///
+    /// Traces to: [INV-006]
+    #[test]
+    fn test_root_task_allowed_with_explicit_flag() {
+        let scheduler = ClusterScheduler::with_options(true, ThermalPolicy::default());
+        assert!(scheduler.allow_insecure_root_tasks());
+
+        let rooted_caps = make_test_capabilities(true, false);
+        let reg = scheduler
+            .register_node(
+                "rooted_node_02".to_string(),
+                rooted_caps,
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let root_task = make_test_task("root_task_02", 60, false, ExecutionEngine::RootShell);
+        scheduler.submit_task(root_task).unwrap();
+
+        // Wi-Fi sync SHOULD dispatch the root task to the rooted node
+        let sync_res = scheduler
+            .sync_node_state("rooted_node_02", &reg.session_token, &[], 2000)
+            .unwrap();
+        assert_eq!(
+            sync_res.desired_tasks.len(),
+            1,
+            "Root shell task must be dispatched when allow_insecure_root_tasks is true on rooted node"
+        );
+        assert_eq!(sync_res.desired_tasks[0].task_id, "root_task_02");
     }
 }

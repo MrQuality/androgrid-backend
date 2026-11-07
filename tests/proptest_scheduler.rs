@@ -29,6 +29,7 @@ prop_compose! {
             shell_command: String::new(),
             artifact_sha256: "sha256-prop".to_string(),
             requires_unmetered,
+            artifact_url: String::new(),
         }
     }
 }
@@ -51,6 +52,8 @@ proptest! {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         };
 
         scheduler.register_node("node-prop".to_string(), caps, "1.0.0".to_string(), 1000).unwrap();
@@ -66,10 +69,11 @@ proptest! {
             shell_command: String::new(),
             artifact_sha256: "sha256-prop".to_string(),
             requires_unmetered: false,
+            artifact_url: String::new(),
         };
 
         scheduler.submit_task(spec).unwrap();
-        scheduler.claim_cellular_task("node-prop", 90, false, 1000).unwrap();
+        scheduler.claim_cellular_task_nominal("node-prop", 90, false, 1000).unwrap();
 
         // Artificially advance attempt by registering and syncing Wi-Fi nodes
         for i in 1..active_attempt {
@@ -84,6 +88,8 @@ proptest! {
                 is_metered: false,
                 current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
                 max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 0,
+                thermal_status: 0,
             };
             let reg = scheduler.register_node(wifi_id.clone(), wifi_caps, "1.0.0".to_string(), 2000).unwrap();
             let _ = scheduler.sync_node_state(&wifi_id, &reg.session_token, &[], 2000);
@@ -138,6 +144,8 @@ proptest! {
             is_metered: true,
             current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
             max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
         };
 
         scheduler.register_node("node-unrooted-prop".to_string(), caps, "1.0.0".to_string(), 1000).unwrap();

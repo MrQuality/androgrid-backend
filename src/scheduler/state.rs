@@ -74,6 +74,8 @@ pub struct WorkerRecord {
     pub client_version: String,
     pub battery_level_pct: u32,
     pub is_charging: bool,
+    pub battery_temperature_celsius: i32,
+    pub thermal_status: u32,
     pub last_seen_epoch_ms: u64,
     pub active_task_ids: Vec<String>,
 }

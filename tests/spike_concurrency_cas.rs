@@ -28,6 +28,8 @@ fn create_caps(is_metered: bool) -> NodeCapabilities {
             NetworkTransportType::NetworkTransportWifiLan as i32
         },
         max_cellular_task_duration_seconds: 180,
+        battery_temperature_celsius: 0,
+        thermal_status: 0,
     }
 }
 
@@ -53,6 +55,7 @@ async fn spike_concurrent_result_submissions_zero_double_commit() {
         shell_command: String::new(),
         artifact_sha256: "sha256-abc".to_string(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -67,7 +70,7 @@ async fn spike_concurrent_result_submissions_zero_double_commit() {
 
     // Node 0 claims the task with run_attempt = 1
     let claim = scheduler
-        .claim_cellular_task("worker-000", 90, false, 1000)
+        .claim_cellular_task_nominal("worker-000", 90, false, 1000)
         .unwrap();
     assert!(claim.task_available);
 
@@ -161,6 +164,7 @@ async fn spike_speculative_preemption_concurrent_race() {
         shell_command: String::new(),
         artifact_sha256: "sha256-xyz".to_string(),
         requires_unmetered: false,
+        artifact_url: String::new(),
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -184,7 +188,7 @@ async fn spike_speculative_preemption_concurrent_race() {
 
     // Cellular worker claims task -> attempt 1
     scheduler
-        .claim_cellular_task("cell-node", 80, false, 1000)
+        .claim_cellular_task_nominal("cell-node", 80, false, 1000)
         .unwrap();
 
     // Wi-Fi worker syncs -> preempts with attempt 2

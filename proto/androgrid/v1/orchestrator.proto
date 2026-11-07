@@ -39,6 +39,10 @@ service AdminService {
 
   // Cancel an active or pending task.
   rpc CancelTask(CancelTaskRequest) returns (CancelTaskResponse);
+
+  // Upload or register a WebAssembly bytecode artifact for content-addressed distribution.
+  // Traces to: [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+  rpc UploadArtifact(UploadArtifactRequest) returns (UploadArtifactResponse);
 }
 
 
@@ -242,3 +246,20 @@ message CancelTaskResponse {
   bool cancelled = 1;
   string message = 2;
 }
+
+// Request to upload or register a WASM bytecode artifact for content-addressed distribution.
+// Traces to: [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+message UploadArtifactRequest {
+  bytes bytecode = 1;
+  string expected_sha256 = 2;
+}
+
+// Response acknowledging artifact registration.
+// Traces to: [NFR-PERF-001], [REQ-OP-003]
+message UploadArtifactResponse {
+  bool success = 1;
+  string artifact_sha256 = 2;
+  string artifact_url = 3;
+  string message = 4;
+}
+

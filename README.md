@@ -34,6 +34,36 @@ The service definition (`androgrid.v1.AndroGridService`) provides two distinct i
 - `ClaimCellularTask`: Unary task lease request (enforcing low-power RRC radio sleep).
 - `SubmitCellularResult`: Atomic task result submission with attempt fencing.
 
+### 3. Content-Addressed Artifact Distribution Engine
+- `/artifacts/<sha256>.wasm`: Embedded HTTP static server serving cached WebAssembly bytecode modules.
+- Sub-4KB Control Plane: Large WASM binaries are decoupled from unary gRPC payloads, preserving the 200 ms cellular radio sleep mandate (`[NFR-POW-001]`).
+- Cryptographic Verification: Worker nodes verify SHA-256 hashes before executing bytecode in memory.
+
+---
+
+## Developer Toolchain & CLI Packaging
+
+### Packaging Workloads (`androgrid-cli pack`)
+Validate WebAssembly modules for WASI Preview 1 compatibility and generate deployment manifests:
+```bash
+androgrid-cli pack \
+  --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
+  --entrypoint _start \
+  --output manifest.json
+```
+
+### Submitting Workloads (`androgrid-cli submit`)
+Submit WebAssembly tasks directly to the orchestrator:
+```bash
+androgrid-cli submit \
+  --wasm ./app.wasm \
+  --timeout 60
+```
+The CLI automatically uploads the artifact to the orchestrator content-addressed storage, sets `artifact_sha256` and `artifact_url`, and dispatches sub-kilobyte gRPC control plane messages.
+
+### Developer Starter Workload
+See [workloads/wasi-starter](workloads/wasi-starter/README.md) for a complete starter project targeting `wasm32-wasip1`.
+
 ---
 
 ## Getting Started
@@ -66,9 +96,12 @@ androgrid-backend/
 │       └── orchestrator.proto
 ├── src/                # Control plane source code
 │   ├── main.rs         # Application entry point
+│   ├── artifact/       # Content-addressed storage & HTTP distribution server
 │   ├── scheduler/      # Dual-assignment & monotonic fencing logic
 │   ├── transport/      # Tonic gRPC services & TLS configuration
-│   └── state/          # In-memory lock-free task state management
+│   └── bin/            # Operator & developer CLI binaries
+├── workloads/          # Canonical developer starter workloads
+│   └── wasi-starter/   # wasm32-wasip1 starter project
 ├── tests/              # Acceptance and concurrency test suites
 ├── build.rs            # Tonic proto compilation build script
 └── Cargo.toml          # Rust crate configuration

@@ -8,3 +8,8 @@
 - [Cloudflare Ingress Deployment Guide](ingress/cloudflare_tunnel.md)
 - [Protobuf gRPC API Specification](api/protobuf.md)
 - [Architecture Decision Records](adr/ADR-001-documentation-portal.md)
+
+# Mobile Worker Client
+
+- [Android Worker Onboarding Guide](android/worker_guide.md)
+- [Android Client Architecture](android/architecture.md)

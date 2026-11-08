@@ -50,4 +50,7 @@ The AndroGrid codebase maintains strict bidirectional traceability to ISO/IEC/IE
 - **[Security & PKI Architecture](security/architecture.md):** Certificate lifecycle, ECDSA P-256 generation, and W^X memory protection.
 - **[Cloudflare Ingress Deployment Guide](ingress/cloudflare_tunnel.md):** Zero-port-forwarding WAN ingress using Cloudflare Anycast tunnels.
 - **[Protobuf gRPC API Specification](api/protobuf.md):** Canonical Protobuf RPC service interfaces and Section 6.3 error mapping matrix.
+- **[Android Worker Onboarding Guide](android/worker_guide.md):** Complete device enrollment, ADB commands, OpenSSL PKI generation, and OEM task killer workarounds.
+- **[Android Client Architecture](android/architecture.md):** Section 6.1 State Matrix, WorkManager spot scheduling, and Chicory WASM sandboxing.
 - **[Architecture Decision Records](adr/ADR-001-documentation-portal.md):** Architectural decisions and engineering rationales.
+- **[Interactive Android Dokka API](https://mrquality.github.io/androgrid-android/dokka/index.html):** Full Kotlin KDoc API documentation and symbol browser on GitHub Pages.

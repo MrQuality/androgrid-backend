@@ -47,6 +47,15 @@ jobs:
         run: |
           mkdir -p docs/src/api/generated
           protoc --doc_out=docs/src/api/generated --doc_opt=html,index.html -I proto proto/androgrid/v1/orchestrator.proto
+          # Sanitize any upstream protobuf scalar type en/em dashes
+          python3 -c "
+          import pathlib
+          p = pathlib.Path('docs/src/api/generated/index.html')
+          if p.exists():
+              text = p.read_text(encoding='utf-8')
+              text = text.replace('\u2013', '-').replace('\u2014', '-')
+              p.write_text(text, encoding='utf-8')
+          "
 
       - name: Audit Typographic Standards (Zero Em/En Dashes)
         run: |

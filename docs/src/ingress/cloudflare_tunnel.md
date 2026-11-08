@@ -12,7 +12,7 @@ Traditional self-hosted edge clusters require operators to configure dynamic DNS
 
 - **[ANTI-002] Anti-Requirement:** The deployment architecture shall not require router port-forwarding rules, public static IP addresses, or third-party client VPN configuration on the host infrastructure.
 - **[INV-001] Outbound Ingress:** The `cloudflared` daemon creates an outbound-only QUIC/HTTP2 tunnel connection to Cloudflare Anycast edge servers.
-- **End-to-End Encryption:** Client certificates and TLS 1.3 mTLS are terminated directly at the host control plane, preventing unauthenticated edge ingress.
+- **Multi-Hop Transport Boundaries:** WAN cellular traffic traverses three distinct transport segments with decoupled TLS boundaries.
 
 ```mermaid
 flowchart LR
@@ -21,18 +21,27 @@ flowchart LR
     end
 
     subgraph AnycastEdge["Cloudflare Anycast Edge"]
-        CFEdge["Cloudflare Edge Network<br/>grpc.cluster.domain.com"]
+        CFEdge["Cloudflare Edge Network<br/>grpc.cluster.domain.com<br/>(Edge TLS Termination)"]
     end
 
     subgraph HostPremise["Host Local Environment (Private LAN)"]
         Tunnel["cloudflared Tunnel Daemon<br/>(Outbound Tunnel Session)"]
-        Orchestrator["Rust Host Control Plane<br/>https://localhost:50051"]
+        Orchestrator["Rust Host Control Plane<br/>https://orchestrator:50051"]
     end
 
-    Worker -->|"Outbound HTTPS/gRPC<br/>(mTLS 1.3)"| CFEdge
-    CFEdge -->|"Multiplexed Tunnel Stream"| Tunnel
-    Tunnel -->|"HTTP/2 Origin Request<br/>(TLS Verified with ca.crt)"| Orchestrator
+    Worker -->|"Leg 1: WAN Ingress<br/>TLS 1.3 to Edge<br/>(API Shield mTLS Optional)"| CFEdge
+    CFEdge -->|"Leg 2: Multiplexed Stream<br/>(Encrypted QUIC / HTTP2 Tunnel)"| Tunnel
+    Tunnel -->|"Leg 3: Origin HTTP/2 Transport<br/>(TLS Verified with ca.crt)"| Orchestrator
 ```
+
+### Ingress Transport Legs and Authentication Boundaries
+
+1. **Leg 1 (Mobile WAN Ingress):** The Android worker connects outbound to Cloudflare Anycast edge servers over TLS 1.3. Standard Cloudflare Anycast terminates the external TLS session at the edge.
+2. **Leg 2 (Anycast Ingress Tunnel):** The `cloudflared` daemon maintains an outbound, persistent multiplexed QUIC/HTTP2 session to Cloudflare, pulling incoming traffic without exposing open inbound host ports (`[INV-001]`, `[ANTI-002]`).
+3. **Leg 3 (Host Local Origin Transport):** The `cloudflared` daemon proxies requests locally to the Rust orchestrator (`https://orchestrator:50051`). Origin verification is enforced by `noTLSVerify: false` and `caPool: /etc/cloudflared/ca.crt`, ensuring `cloudflared` only forwards traffic to an orchestrator presenting a valid internal certificate signed by the cluster Root CA.
+
+> [!IMPORTANT]
+> **Edge vs Origin mTLS Boundary:** Standard Cloudflare Tunnels terminate the client's TLS session at Cloudflare's Anycast edge; client X.509 certificates are not transparently forwarded through the tunnel stream to the origin gRPC server. While direct Wi-Fi connections terminate mTLS 1.3 directly at the Rust orchestrator (`[INV-002]`), WAN ingress via Cloudflare requires provisioning **Cloudflare API Shield mTLS** at the edge or evaluating application-layer cryptographic tokens to enforce mobile node identity before dispatching tasks. Cloudflare diagrams must reflect this three-hop boundary rather than asserting uninterrupted end-to-end client-certificate forwarding.
 
 ---
 
@@ -143,4 +152,4 @@ androgrid-cli \
   nodes
 ```
 
-The request traverses the Cloudflare Anycast edge, forwards through the tunnel, mutually authenticates via TLS 1.3, and returns the cluster node inventory.
+The request traverses the Cloudflare Anycast edge, forwards through the tunnel stream to the origin orchestrator over verified origin TLS, and returns the cluster node inventory.

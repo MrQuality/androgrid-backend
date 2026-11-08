@@ -57,33 +57,37 @@ sequenceDiagram
     participant Cell as Cellular Worker (Attempt 1)
     participant WiFi as Wi-Fi Worker (Attempt 2)
 
-    Note over Cell,Orch: Cellular Worker claims task
+    Note over Cell,Orch: Cellular Worker claims task (Attempt 1)
     Cell->>Orch: ClaimCellularTaskRequest (Node A)
     Orch-->>Cell: ClaimCellularTaskResponse (Task X, run_attempt=1)
-    Note over Cell: Socket closed within 200ms (RRC Sleep)
-    Note over Cell: Executing WASM payload...
+    Note over Cell: Application closes socket < 200ms
+    Note over Cell: Executing WASI payload locally...
 
-    Note over Orch,WiFi: Wi-Fi worker connects; Orchestrator speculatively preempts
+    Note over Orch,WiFi: Wi-Fi worker connects; Orchestrator activates Attempt 2
     WiFi->>Orch: SyncNodeStateRequest (Node B)
+    Orch->>Orch: Bump active_attempt: 1 -> 2
     Orch-->>WiFi: SyncNodeStateResponse (Task X, run_attempt=2)
-    Note over WiFi: Executing WASM payload...
+    Note over WiFi: Executing WASI payload...
 
-    Note over Cell,Orch: Cellular worker finishes first
+    Note over Cell,Orch: Cellular worker finishes Attempt 1
     Cell->>Orch: SubmitCellularResultRequest (Task X, run_attempt=1)
-    Orch->>Orch: CAS update state: RUNNING -> COMPLETED
-    Orch-->>Cell: SubmitCellularResultResponse (accepted=true)
+    Orch->>Orch: Fencing Check: submitted (1) < active (2)
+    Orch-->>Cell: SchedulingError::AttemptStale (TASK_ATTEMPT_STALE)
 
-    Note over WiFi,Orch: Wi-Fi worker finishes later
+    Note over WiFi,Orch: Wi-Fi worker completes Attempt 2
     WiFi->>Orch: SyncNodeStateRequest (Task X completed, run_attempt=2)
-    Orch->>Orch: Verify attempt: Task X already finalized
-    Orch-->>WiFi: SyncNodeStateResponse (acknowledged=Task X, dropped)
+    Orch->>Orch: Fencing Check: submitted (2) == active (2)
+    Orch->>Orch: CAS update state: RUNNING -> COMPLETED
+    Orch-->>WiFi: SyncNodeStateResponse (acknowledged=Task X, accepted=true)
 ```
 
-### Speculative Dual-Assignment Rules
-1. Every task holds a monotonic `run_attempt` counter starting at 1.
-2. If a cellular worker holds a lease on Task X (`run_attempt = 1`), and an unmetered Wi-Fi worker connects, the orchestrator may speculatively assign Task X to the Wi-Fi node with `run_attempt = 2`.
-3. Whichever worker returns a valid result first executes an atomic Compare-And-Swap transition from `RUNNING` to `COMPLETED`.
-4. Subsequent submissions bearing a stale or already finalized attempt counter are rejected with `TASK_ATTEMPT_STALE`, guaranteeing zero duplicate results (`[NFR-REL-001]`).
+### Atomic Monotonic Fencing Rules (`[INV-004]`)
+1. Every task holds a monotonic `active_attempt` counter starting at 1.
+2. If a cellular worker claims Task X (`run_attempt = 1`), `active_attempt` is initialized to 1.
+3. When an unmetered Wi-Fi worker connects, the orchestrator may speculatively dual-assign or preempt Task X to the Wi-Fi node, monotonically incrementing `active_attempt` to 2 and dispatching `run_attempt = 2`.
+4. **Monotonic Fencing Rule (`src/scheduler/engine.rs`):** Any incoming submission bearing `run_attempt < active_attempt` is immediately rejected with `TASK_ATTEMPT_STALE`. Because activating attempt 2 sets `active_attempt = 2`, the cellular worker's attempt 1 cannot commit.
+5. Once a valid submission matching `active_attempt` arrives, the orchestrator commits an atomic Compare-And-Swap (CAS) transition from `RUNNING` (or `PREEMPTED`) to `COMPLETED` or `FAILED`.
+6. Any submission arriving after a task is finalized in `Completed` or `Failed` state is rejected with `AlreadyFinalized`, guaranteeing exactly-once finalization and zero duplicate executions (`[NFR-REL-001]`).
 
 ---
 
@@ -91,5 +95,5 @@ sequenceDiagram
 
 To ensure safe computation across unrooted consumer devices:
 - **Sandbox Isolation Boundary (`[INV-006]`):** Unrooted devices are strictly restricted to WebAssembly execution (`EXECUTION_ENGINE_WASM_WASI`). Shell execution (`EXECUTION_ENGINE_ROOT_SHELL`) is never assigned to unrooted workers.
-- **In-Memory W^X Security (`[REQ-VER-003]`):** Android 10+ devices prohibit executing shared objects from writable app storage. Bytecode compilation takes place exclusively in memory via `memfd_create` or interpreter fallback.
+- **In-Memory Pure-JVM Execution (`[REQ-VER-003]`):** Android 10+ devices enforce W^X (Write XOR Execute) memory policies on application directories. The Android worker embeds the Chicory pure-JVM WebAssembly and WASI Preview 1 interpreter, executing bytecode entirely in-memory without compiling or emitting native `.so` binaries on writable app storage.
 - **Decoupled Artifact Distribution:** WebAssembly bytecode is distributed via content-addressed SHA-256 URLs, reducing unary gRPC metadata to under 4 KB and preserving cellular radio sleep deadlines (`[NFR-POW-001]`).

@@ -1,0 +1,231 @@
+/* AndroGrid Modern Documentation Theme & Animation Stylesheet
+ * Traces to: [NFR-DOC-001], [REQ-PUB-001]
+ */
+
+:root {
+    --ag-cyan: #06b6d4;
+    --ag-cyan-glow: rgba(6, 182, 212, 0.4);
+    --ag-blue: #3b82f6;
+    --ag-violet: #8b5cf6;
+    --ag-emerald: #10b981;
+    --ag-amber: #f59e0b;
+    --ag-rose: #f43f5e;
+    --ag-bg-glass: rgba(15, 23, 42, 0.65);
+    --ag-border-glow: rgba(59, 130, 246, 0.35);
+}
+
+/* Animated Gradient Headers */
+h1 {
+    background: linear-gradient(135deg, #38bdf8 0%, #818cf8 50%, #c084fc 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800 !important;
+    letter-spacing: -0.02em;
+    padding-bottom: 0.3rem;
+    border-bottom: 2px solid rgba(56, 189, 248, 0.25) !important;
+    margin-bottom: 1.5rem !important;
+}
+
+h2 {
+    color: #38bdf8 !important;
+    font-weight: 700 !important;
+    border-bottom: 1px solid rgba(56, 189, 248, 0.15) !important;
+    padding-bottom: 0.25rem;
+    margin-top: 2rem !important;
+}
+
+h3 {
+    color: #93c5fd !important;
+    font-weight: 600 !important;
+}
+
+/* Pulsing Status Badges */
+.pulse-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.25rem 0.75rem;
+    border-radius: 9999px;
+    font-size: 0.85rem;
+    font-weight: 600;
+    background: rgba(16, 185, 129, 0.15);
+    color: #34d399;
+    border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.pulse-dot {
+    width: 0.65rem;
+    height: 0.65rem;
+    border-radius: 50%;
+    background-color: #10b981;
+    box-shadow: 0 0 0 rgba(16, 185, 129, 0.6);
+    animation: pulseGlow 1.8s infinite;
+}
+
+@keyframes pulseGlow {
+    0% {
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.7);
+    }
+    70% {
+        box-shadow: 0 0 0 8px rgba(16, 185, 129, 0);
+    }
+    100% {
+        box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+    }
+}
+
+/* Glassmorphism Callout Cards */
+.callout {
+    padding: 1.2rem 1.5rem;
+    border-radius: 12px;
+    margin: 1.5rem 0;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.callout:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.45);
+}
+
+.callout-info {
+    background: linear-gradient(135deg, rgba(14, 116, 144, 0.25) 0%, rgba(30, 58, 138, 0.25) 100%);
+    border-left: 4px solid var(--ag-cyan);
+}
+
+.callout-tip {
+    background: linear-gradient(135deg, rgba(6, 95, 70, 0.25) 0%, rgba(17, 94, 89, 0.25) 100%);
+    border-left: 4px solid var(--ag-emerald);
+}
+
+.callout-warning {
+    background: linear-gradient(135deg, rgba(146, 64, 14, 0.25) 0%, rgba(120, 53, 15, 0.25) 100%);
+    border-left: 4px solid var(--ag-amber);
+}
+
+/* Mermaid Diagram Flow Animation */
+.mermaid {
+    background: rgba(15, 23, 42, 0.8) !important;
+    border: 1px solid rgba(56, 189, 248, 0.25) !important;
+    border-radius: 12px !important;
+    padding: 1.5rem !important;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5) !important;
+    overflow-x: auto;
+}
+
+/* Animated flow lines in Mermaid diagrams */
+.mermaid svg .edgePaths path,
+.mermaid svg .flowchart-link,
+.mermaid svg path.edge-thickness-normal,
+.mermaid svg path.messageLine0,
+.mermaid svg path.messageLine1 {
+    stroke: #38bdf8 !important;
+    stroke-width: 2px !important;
+    stroke-dasharray: 6, 6;
+    animation: dataStreamFlow 2s linear infinite !important;
+}
+
+@keyframes dataStreamFlow {
+    from {
+        stroke-dashoffset: 24;
+    }
+    to {
+        stroke-dashoffset: 0;
+    }
+}
+
+/* Interactive Tables */
+table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    border-radius: 10px;
+    overflow: hidden;
+    margin: 1.5rem 0;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
+}
+
+table th {
+    background: rgba(30, 41, 59, 0.9) !important;
+    color: #38bdf8 !important;
+    font-weight: 700;
+    text-transform: uppercase;
+    font-size: 0.8rem;
+    letter-spacing: 0.05em;
+    padding: 0.85rem 1rem;
+    border-bottom: 2px solid rgba(56, 189, 248, 0.3) !important;
+}
+
+table td {
+    padding: 0.85rem 1rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    transition: background 0.15s ease;
+}
+
+table tr:hover td {
+    background: rgba(56, 189, 248, 0.08) !important;
+}
+
+/* Code block glowing accents */
+pre {
+    border: 1px solid rgba(56, 189, 248, 0.2) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35) !important;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+pre:hover {
+    border-color: rgba(56, 189, 248, 0.45) !important;
+    box-shadow: 0 4px 25px rgba(6, 182, 212, 0.25) !important;
+}
+
+/* Parameter Badges */
+.param-badge {
+    display: inline-block;
+    padding: 0.2rem 0.5rem;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 0.82rem;
+    font-weight: 600;
+    background: rgba(56, 189, 248, 0.12);
+    color: #38bdf8;
+    border: 1px solid rgba(56, 189, 248, 0.25);
+}
+
+.param-type {
+    display: inline-block;
+    padding: 0.15rem 0.45rem;
+    border-radius: 6px;
+    font-family: monospace;
+    font-size: 0.78rem;
+    background: rgba(139, 92, 246, 0.15);
+    color: #c084fc;
+    border: 1px solid rgba(139, 92, 246, 0.3);
+}
+
+.param-required {
+    display: inline-block;
+    padding: 0.15rem 0.45rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    background: rgba(244, 63, 94, 0.15);
+    color: #fb7185;
+    border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+.param-optional {
+    display: inline-block;
+    padding: 0.15rem 0.45rem;
+    border-radius: 6px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    background: rgba(148, 163, 184, 0.15);
+    color: #94a3b8;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}

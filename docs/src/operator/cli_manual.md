@@ -1,22 +1,22 @@
 # Operator Manual and CLI Reference
 
-The `androgrid-cli` tool provides cluster administrators and automation pipelines with direct control over the AndroGrid control plane: managing compute task submissions, inspecting worker node inventories, and tracking execution states.
+The `androgrid-cli` tool provides cluster administrators, devops engineers, and automated CI pipelines with complete operational control over the AndroGrid control plane: managing compute task submissions, inspecting registered mobile worker inventories, monitoring runtime status, and cancelling tasks.
 
 Traceability: `[REQ-PUB-001]`, `[REQ-OP-001]`, `[REQ-OP-004]`, `[INV-002]`, `[NFR-SEC-001]`, `[NFR-PERF-001]`.
 
 ---
 
-## Global Options
+## Global Command Line Options
 
-The following flags apply globally across all subcommands and can be provided as CLI arguments or environment variables:
+The following flags apply globally across all subcommands. They can be supplied explicitly on the command line or via environment variables:
 
-| Flag | Environment Variable | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `--endpoint <URL>` | `ANDROGRID_ENDPOINT` | `https://127.0.0.1:50051` | gRPC control plane URL |
-| `--ca-cert <PATH>` | `ANDROGRID_CA_CERT` | None | Path to root CA PEM certificate for TLS 1.3 mTLS |
-| `--client-cert <PATH>` | `ANDROGRID_CLIENT_CERT` | None | Path to operator client PEM certificate |
-| `--client-key <PATH>` | `ANDROGRID_CLIENT_KEY` | None | Path to operator client private key PEM |
-| `--format <FORMAT>` | N/A | `text` | Output format: `text` or `json` |
+| Flag | Environment Variable | Type | Default | Description & Operational Impact |
+| :--- | :--- | :--- | :--- | :--- |
+| `--endpoint <URL>` | `ANDROGRID_ENDPOINT` | String | `https://127.0.0.1:50051` | **Control Plane URL:** Target gRPC endpoint. Must use HTTPS scheme when TLS 1.3 is enabled. |
+| `--ca-cert <PATH>` | `ANDROGRID_CA_CERT` | Path | None | **Root CA Certificate:** Path to internal Root CA PEM file. Required when communicating with an mTLS-secured orchestrator. |
+| `--client-cert <PATH>` | `ANDROGRID_CLIENT_CERT` | Path | None | **Client Certificate:** Path to operator X.509 client certificate for mutual TLS authentication (`[INV-002]`). |
+| `--client-key <PATH>` | `ANDROGRID_CLIENT_KEY` | Path | None | **Client Key:** Path to unencrypted PKCS#8 or SEC1 private key matching `--client-cert`. |
+| `--format <FORMAT>` | N/A | Enum | `text` | **Output Format:** Choose `text` for human-friendly terminal badges and tables, or `json` for machine automation. |
 
 ---
 
@@ -24,16 +24,19 @@ The following flags apply globally across all subcommands and can be provided as
 
 ### `androgrid-cli pack`
 
-Validates a WebAssembly module for WASI Preview 1 compliance and generates a deployment manifest.
+Validates a compiled WebAssembly binary for WASI Preview 1 compliance, computes its cryptographic SHA-256 digest, and optionally generates an ISO 29148 deployment manifest.
 
 Traceability: `[INV-006]`, `[REQ-OP-003]`.
 
-#### Options
-- `--wasm <PATH>`: (Required) Path to the WebAssembly module bytecode (`.wasm`).
-- `--entrypoint <SYMBOL>`: (Optional, default: `_start`) Exported WASM entrypoint function name.
-- `--output <PATH>`: (Optional) Output path for saving the generated manifest JSON.
+#### Parameter Specification
 
-#### Example: Human-Readable Text Output (`--format text`)
+| Option | Type | Required | Default | Detailed Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `--wasm <PATH>` | File Path | **Yes** | N/A | Path to the `.wasm` binary file. The tool parses WASM magic headers (`\0asm`) and validates WASI import namespaces. |
+| `--entrypoint <SYMBOL>` | String | No | `_start` | Exported function symbol invoked by the runtime. WASI command binaries typically export `_start`. |
+| `--output <PATH>` | File Path | No | None | Optional path to write the formatted JSON deployment manifest containing module metadata. |
+
+#### Human-Readable Invocation (`--format text`)
 ```bash
 androgrid-cli pack \
   --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
@@ -42,7 +45,7 @@ androgrid-cli pack \
   --format text
 ```
 
-Output:
+Expected Output:
 ```text
 [+] WebAssembly module validated successfully: wasi_snapshot_preview1
     Artifact SHA-256: 3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a
@@ -51,7 +54,7 @@ Output:
 [+] Manifest written to manifest.json
 ```
 
-#### Example: Structured JSON Output (`--format json`)
+#### JSON Automation Invocation (`--format json`)
 ```bash
 androgrid-cli pack \
   --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
@@ -59,7 +62,7 @@ androgrid-cli pack \
   --format json
 ```
 
-Output:
+Expected JSON Output:
 ```json
 {
   "name": "wasi_starter.wasm",
@@ -76,32 +79,38 @@ Output:
 
 ### `androgrid-cli submit`
 
-Enqueues a compute task into the cluster scheduling queue. Supports automatic content-addressed bytecode uploading and decoupled URLs.
+Enqueues a new compute workload into the cluster scheduling queue. Operates in two modes:
+1. **Decoupled Artifact Mode (Default):** Uploads the WASM bytecode to the content-addressed artifact store via `AdminService.UploadArtifact` and passes a lightweight URL reference, keeping gRPC payloads sub-4KB (`[NFR-POW-001]`).
+2. **In-Band Mode (`--inline`):** Retains raw bytecode in the gRPC message payload (restricted by `[NFR-PERF-001]` 16 MB frame limit).
 
-Traceability: `[REQ-OP-003]`, `[INV-004]`, `[NFR-POW-001]`.
+Traceability: `[REQ-OP-003]`, `[INV-004]`, `[INV-005]`, `[NFR-POW-001]`, `[NFR-PERF-001]`.
 
-#### Options
-- `--task-id <ID>`: (Optional) Explicit task identifier. If omitted, a UUID is automatically generated.
-- `--wasm <PATH>`: Path to WebAssembly module bytecode (`.wasm`). Conflicts with `--shell`.
-- `--entrypoint <SYMBOL>`: (Default: `_start`) Entrypoint symbol for WASM execution.
-- `--inline`: Retains raw bytecode within the gRPC message payload instead of decoupled content-addressed storage.
-- `--shell <COMMAND>`: Shell command string to execute. Conflicts with `--wasm`.
-- `--root`: Executes shell command with root privileges. Requires rooted worker node (`is_rooted == true`). Requires `--shell`.
-- `--timeout <SECONDS>`: (Default: 30) Execution timeout deadline in seconds.
-- `--requires-unmetered`: Restricts task scheduling to unmetered Wi-Fi connections only (`[ANTI-003]`).
-- `--artifact-url <URL>`: Explicit download URL for pre-cached artifact distribution.
-- `--env <KEY=VALUE>`: Environment variables passed to compute runtime. Can be repeated.
+#### Parameter Specification
 
-#### Example: Submit WASM Task (`--format text`)
+| Option | Type | Required | Default | Detailed Description & Constraints |
+| :--- | :--- | :--- | :--- | :--- |
+| `--wasm <PATH>` | File Path | Conditional | None | Path to `.wasm` binary. Required unless `--shell` is specified. Conflicts with `--shell`. |
+| `--entrypoint <SYM>` | String | No | `_start` | Exported WASI function name. Applicable only with `--wasm`. |
+| `--task-id <ID>` | String | No | UUIDv4 | Custom unique task identifier. If omitted, the orchestrator generates a random UUID. |
+| `--inline` | Boolean Flag | No | `false` | When set, embeds raw bytecode inside the gRPC payload instead of uploading to content-addressed storage. |
+| `--shell <CMD>` | String | Conditional | None | Shell command string. Conflicts with `--wasm`. |
+| `--root` | Boolean Flag | No | `false` | Grants root execution privileges. Requires `--shell`. Only executed by rooted worker nodes (`[INV-006]`). |
+| `--timeout <SECS>` | Integer | No | `30` | Maximum allowed runtime in seconds before the orchestrator triggers task timeout. |
+| `--requires-unmetered` | Boolean Flag | No | `false` | When enabled, prevents scheduling to cellular workers (`[ANTI-003]`). Restricts to Wi-Fi nodes. |
+| `--artifact-url <URL>` | String | No | None | Explicit HTTP/HTTPS pre-cached URL for artifact download by mobile clients. |
+| `--env <KEY=VALUE>` | Key-Value Pair | No | Empty | Environment variables provided to the runtime environment. Can be specified multiple times. |
+
+#### Example Invocation: Standard WASM Submission
 ```bash
 androgrid-cli submit \
   --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
   --timeout 60 \
   --env MATRIX_DIM=512 \
+  --env LOG_LEVEL=debug \
   --format text
 ```
 
-Output:
+Expected Output:
 ```text
 [+] Bytecode artifact uploaded to content-addressed storage
     SHA-256: 3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a
@@ -110,33 +119,19 @@ Output:
     Task ID: task_c9f28a7e_41b3_4e89_a248_18a28f731e50
 ```
 
-#### Example: Submit WASM Task (`--format json`)
-```bash
-androgrid-cli submit \
-  --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
-  --timeout 60 \
-  --format json
-```
-
-Output:
-```json
-{
-  "accepted": true,
-  "task_id": "task_c9f28a7e_41b3_4e89_a248_18a28f731e50",
-  "message": "Task queued for scheduling"
-}
-```
-
 ---
 
 ### `androgrid-cli status`
 
-Queries the execution status, exit code, stdout, and stderr for a task.
+Fetches real-time execution progress, completion state, exit codes, and output buffers for an assigned task.
 
-#### Arguments
-- `<TASK_ID>`: (Positional, required) Task identifier.
+#### Arguments & Options
 
-#### Example: Query Task Status (`--format text`)
+| Argument | Position | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `<TASK_ID>` | Positional (1) | **Yes** | The canonical task identifier returned during submission. |
+
+#### Example Invocation
 ```bash
 androgrid-cli status task_c9f28a7e_41b3_4e89_a248_18a28f731e50 --format text
 ```
@@ -152,33 +147,13 @@ Stdout:
 [WASI Starter] Matrix computation verified successfully.
 ```
 
-#### Example: Query Task Status (`--format json`)
-```bash
-androgrid-cli status task_c9f28a7e_41b3_4e89_a248_18a28f731e50 --format json
-```
-
-Output:
-```json
-{
-  "task_id": "task_c9f28a7e_41b3_4e89_a248_18a28f731e50",
-  "state": "TASK_STATE_COMPLETED",
-  "active_attempt": 1,
-  "exit_code": 0,
-  "execution_duration_ms": 142,
-  "stdout": "[WASI Starter] Matrix computation verified successfully.\n",
-  "stderr": "",
-  "error_code": "",
-  "error_message": ""
-}
-```
-
 ---
 
 ### `androgrid-cli nodes`
 
-Lists all registered mobile worker nodes, their battery levels, thermal metrics, and network transport types.
+Queries the active worker node registry, detailing device architecture, battery levels, thermal metrics, and network transport modes.
 
-#### Example: Inventory Nodes (`--format text`)
+#### Example Invocation
 ```bash
 androgrid-cli nodes --format text
 ```
@@ -197,40 +172,19 @@ Thermal Status: 0 (THERMAL_STATUS_NONE)
 Last Seen:      1s ago
 ```
 
-#### Example: Inventory Nodes (`--format json`)
-```bash
-androgrid-cli nodes --format json
-```
-
-Output:
-```json
-[
-  {
-    "node_id": "node_pixel_7_01",
-    "client_version": "0.1.0",
-    "os_version": "14",
-    "abi": "arm64-v8a",
-    "is_rooted": false,
-    "is_metered": false,
-    "transport": "NETWORK_TRANSPORT_WIFI_LAN",
-    "cpu_cores": 8,
-    "ram_bytes": 7969177600,
-    "thermal_status": 0,
-    "last_seen_secs_ago": 1
-  }
-]
-```
-
 ---
 
 ### `androgrid-cli cancel`
 
-Cancels an active or pending task in the cluster state engine.
+Signals the orchestrator state machine to transition a pending or running task into the `TASK_STATE_PREEMPTED` or `CANCELLED` state.
 
-#### Arguments
-- `<TASK_ID>`: (Positional, required) Task identifier to cancel.
+#### Arguments & Options
 
-#### Example: Cancel Task (`--format text`)
+| Argument | Position | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `<TASK_ID>` | Positional (1) | **Yes** | The canonical task identifier to abort. |
+
+#### Example Invocation
 ```bash
 androgrid-cli cancel task_c9f28a7e_41b3_4e89_a248_18a28f731e50 --format text
 ```
@@ -238,18 +192,4 @@ androgrid-cli cancel task_c9f28a7e_41b3_4e89_a248_18a28f731e50 --format text
 Output:
 ```text
 [+] Task task_c9f28a7e_41b3_4e89_a248_18a28f731e50 successfully cancelled.
-```
-
-#### Example: Cancel Task (`--format json`)
-```bash
-androgrid-cli cancel task_c9f28a7e_41b3_4e89_a248_18a28f731e50 --format json
-```
-
-Output:
-```json
-{
-  "task_id": "task_c9f28a7e_41b3_4e89_a248_18a28f731e50",
-  "cancelled": true,
-  "message": "Task transitioned to CANCELLED state"
-}
 ```

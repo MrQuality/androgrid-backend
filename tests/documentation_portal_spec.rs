@@ -154,6 +154,33 @@ fn test_quickstart_enforces_podman_standard_and_detailed_arguments() {
     );
 }
 
+/// Validates that Android worker chapters exist and cross-link to the Dokka API portal.
+///
+/// Traces to: [REQ-PUB-001], [REQ-OP-001], [REQ-OP-003]
+#[test]
+fn test_android_worker_chapters_and_dokka_cross_links() {
+    let docs_root = get_docs_root();
+    let guide_path = docs_root
+        .join("src")
+        .join("android")
+        .join("worker_guide.md");
+    let arch_path = docs_root
+        .join("src")
+        .join("android")
+        .join("architecture.md");
+
+    assert!(guide_path.exists(), "android/worker_guide.md must exist");
+    assert!(arch_path.exists(), "android/architecture.md must exist");
+
+    let guide_content = fs::read_to_string(&guide_path).expect("Failed to read worker_guide.md");
+    let arch_content = fs::read_to_string(&arch_path).expect("Failed to read architecture.md");
+
+    assert!(
+        guide_content.contains("https://mrquality.github.io/androgrid-android/dokka/index.html")
+    );
+    assert!(arch_content.contains("https://mrquality.github.io/androgrid-android/dokka/index.html"));
+}
+
 /// Validates that the Operator CLI Manual strictly documents all subcommands
 /// and flags from the clap definition.
 ///

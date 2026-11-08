@@ -1,0 +1,47 @@
+# AndroGrid Production Cluster Podman Compose Blueprint
+# Traces to: AG-SPEC-2026-V2 Section 2.2, Section 2.3, [INV-002], [ANTI-002], [NFR-SEC-001]
+#
+# Rootless Podman deployment architecture: eliminates root daemon attack surfaces.
+
+version: "3.8"
+
+services:
+  # Host Control Plane Orchestrator Service
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: Containerfile
+    container_name: androgrid-orchestrator
+    restart: unless-stopped
+    ports:
+      - "50051:50051"
+    environment:
+      - ANDROGRID_LISTEN_ADDR=0.0.0.0:50051
+      - ANDROGRID_CA_CERT_PATH=/etc/androgrid/pki/ca.crt
+      - ANDROGRID_SERVER_CERT_PATH=/etc/androgrid/pki/server.crt
+      - ANDROGRID_SERVER_KEY_PATH=/etc/androgrid/pki/server.key
+      - ANDROGRID_HEARTBEAT_SECS=2
+      - ANDROGRID_LEASE_TIMEOUT_SECS=10
+      - RUST_LOG=info
+    volumes:
+      - ./pki:/etc/androgrid/pki:ro,Z
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 50051 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Cloudflare Anycast Tunnel Ingress Sidecar (Zero Port-Forwarding Enforced [ANTI-002])
+  cloudflared:
+    image: docker.io/cloudflare/cloudflared:latest
+    container_name: androgrid-cloudflared-tunnel
+    restart: unless-stopped
+    command: tunnel run
+    environment:
+      - TUNNEL_METRICS=0.0.0.0:2000
+    volumes:
+      - ./ingress/cloudflared.yml:/etc/cloudflared/config.yml:ro,Z
+      - ./credentials.json:/etc/cloudflared/credentials.json:ro,Z
+      - ./pki/ca.crt:/etc/cloudflared/ca.crt:ro,Z
+    depends_on:
+      - orchestrator

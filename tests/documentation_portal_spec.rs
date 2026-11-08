@@ -49,6 +49,18 @@ fn test_documentation_site_structure_and_book_config() {
         book_content.contains("mermaid"),
         "book.toml must reference mermaid scripts"
     );
+    assert!(
+        book_content.contains("custom.css"),
+        "book.toml must configure custom.css for styling and animations"
+    );
+
+    // Verify custom styling and animation assets exist
+    let custom_css = docs_root.join("theme").join("custom.css");
+    assert!(
+        custom_css.exists(),
+        "theme/custom.css must exist at {:?}",
+        custom_css
+    );
 
     // Verify mermaid support assets exist
     let mermaid_js = docs_root.join("theme").join("mermaid.min.js");
@@ -106,6 +118,39 @@ fn test_all_summary_links_exist_and_non_empty() {
         links_found >= 6,
         "SUMMARY.md must declare at least 6 core documentation chapters, found {}",
         links_found
+    );
+}
+
+/// Validates that quickstart guide enforces rootless Podman deployment standards
+/// and comprehensive parameter breakdowns.
+///
+/// Traces to: [NFR-SEC-001], [REQ-PUB-001]
+#[test]
+fn test_quickstart_enforces_podman_standard_and_detailed_arguments() {
+    let docs_root = get_docs_root();
+    let quickstart_path = docs_root
+        .join("src")
+        .join("getting_started")
+        .join("quickstart.md");
+
+    assert!(quickstart_path.exists(), "quickstart.md must exist");
+    let content = fs::read_to_string(&quickstart_path).expect("Failed to read quickstart.md");
+
+    assert!(
+        content.contains("Podman"),
+        "Quickstart must document Podman container orchestration"
+    );
+    assert!(
+        content.contains("podman compose"),
+        "Quickstart must specify podman compose command"
+    );
+    assert!(
+        content.contains("Parameter Breakdown"),
+        "Quickstart must provide detailed parameter breakdowns"
+    );
+    assert!(
+        content.contains("Argument 1") && content.contains("Argument 2"),
+        "Quickstart must explain individual positional arguments"
     );
 }
 

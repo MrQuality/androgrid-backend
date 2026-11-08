@@ -40,7 +40,7 @@ flowchart LR
 
 ### Step 1: Install and Authenticate `cloudflared`
 
-Install the `cloudflared` binary on the host machine or use the provided Docker image:
+Install the `cloudflared` binary on the host machine or run the container image via Podman:
 
 ```bash
 # Authenticate cloudflared with your Cloudflare account
@@ -107,19 +107,19 @@ Key configuration parameters:
 
 ---
 
-### Step 5: Launch Ingress via Docker Compose
+### Step 5: Launch Ingress via Podman Compose
 
-In `deploy/docker-compose.yml`, the `cloudflared` service is configured as a companion container:
+In `deploy/podman-compose.yml`, the `cloudflared` service is configured as a companion container:
 
 ```bash
 cd deploy
-docker compose up -d cloudflared
+podman compose up -d cloudflared
 ```
 
 Inspect tunnel logs to confirm established edge connections:
 
 ```bash
-docker compose logs -f cloudflared
+podman compose logs -f cloudflared
 ```
 
 Expected log output:

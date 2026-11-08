@@ -46,6 +46,7 @@ The AndroGrid codebase maintains strict bidirectional traceability to ISO/IEC/IE
 
 - **[System Architecture](architecture/system_overview.md):** Deep dive into the dual-route topology (Wi-Fi LAN vs Cellular WAN) and state machine consensus.
 - **[Getting Started & Quickstart](getting_started/quickstart.md):** Step-by-step instructions to run the orchestrator cluster locally via Podman Compose.
+- **[Workload Developer Guide: Compiling to WASI](workloads/compilation_guide.md):** Step-by-step compilation recipes for Rust, Go, C/C++, Python, and JavaScript into WASI Preview 1 binaries.
 - **[Operator Manual & CLI Reference](operator/cli_manual.md):** Command line usage guide for `androgrid-cli` task packaging, submission, and monitoring.
 - **[Security & PKI Architecture](security/architecture.md):** Certificate lifecycle, ECDSA P-256 generation, and W^X memory protection.
 - **[Cloudflare Ingress Deployment Guide](ingress/cloudflare_tunnel.md):** Zero-port-forwarding WAN ingress using Cloudflare Anycast tunnels.

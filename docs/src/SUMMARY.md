@@ -3,6 +3,7 @@
 - [Introduction](README.md)
 - [System Architecture](architecture/system_overview.md)
 - [Getting Started & Quickstart](getting_started/quickstart.md)
+- [Workload Developer Guide: Compiling to WASI](workloads/compilation_guide.md)
 - [Operator Manual & CLI Reference](operator/cli_manual.md)
 - [Security & PKI Architecture](security/architecture.md)
 - [Cloudflare Ingress Deployment Guide](ingress/cloudflare_tunnel.md)

@@ -181,6 +181,57 @@ fn test_android_worker_chapters_and_dokka_cross_links() {
     assert!(arch_content.contains("https://mrquality.github.io/androgrid-android/dokka/index.html"));
 }
 
+/// Validates that the Workload Developer Guide covers multi-language WASI compilation,
+/// mentions RFC Issue #22 as an interim step, and documents direct shell fallback.
+///
+/// Traces to: [REQ-PUB-001], [REQ-OP-004], [INV-006]
+#[test]
+fn test_workload_developer_compilation_guide_completeness() {
+    let docs_root = get_docs_root();
+    let guide_path = docs_root
+        .join("src")
+        .join("workloads")
+        .join("compilation_guide.md");
+
+    assert!(
+        guide_path.exists(),
+        "workloads/compilation_guide.md must exist"
+    );
+    let content = fs::read_to_string(&guide_path).expect("Failed to read compilation_guide.md");
+
+    // Must reference RFC Issue #22 as an interim step
+    assert!(
+        content.contains("Issue #22") || content.contains("issues/22"),
+        "Must reference RFC Issue #22"
+    );
+    assert!(
+        content.contains("Interim"),
+        "Must explicitly explain that manual compilation is an interim step"
+    );
+
+    // Must cover core language recipes
+    assert!(content.contains("Rust"), "Must document Rust compilation");
+    assert!(
+        content.contains("wasm32-wasip1"),
+        "Must specify wasm32-wasip1 target"
+    );
+    assert!(
+        content.contains("Go"),
+        "Must document Go / TinyGo compilation"
+    );
+    assert!(content.contains("Python"), "Must document Python execution");
+    assert!(
+        content.contains("JavaScript"),
+        "Must document JavaScript execution"
+    );
+
+    // Must document direct shell fallback
+    assert!(
+        content.contains("--shell"),
+        "Must document direct shell fallback"
+    );
+}
+
 /// Validates that the Operator CLI Manual strictly documents all subcommands
 /// and flags from the clap definition.
 ///

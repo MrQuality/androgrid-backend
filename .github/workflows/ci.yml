@@ -47,7 +47,7 @@ jobs:
       - name: Audit Typographic Standards (Zero Em/En Dashes)
         run: |
           echo "Scanning for forbidden em dashes and en dashes..."
-          if grep -rnP '[\x{2013}\x{2014}]' src/ tests/ proto/ deploy/ tools/; then
+          if grep -rnP '[\x{2013}\x{2014}]' src/ tests/ proto/ deploy/ tools/ docs/; then
             echo "Error: Forbidden em dash or en dash detected!"
             exit 1
           fi

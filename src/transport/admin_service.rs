@@ -10,19 +10,24 @@ use tonic::{Request, Response, Status};
 
 use crate::admin_service_server::AdminService;
 use crate::artifact::ArtifactStore;
+use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
 use crate::{
-    CancelTaskRequest, CancelTaskResponse, GetTaskStatusRequest, GetTaskStatusResponse,
+    CancelTaskRequest, CancelTaskResponse, GeneratePairingTokenRequest,
+    GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse,
     ListWorkerNodesRequest, ListWorkerNodesResponse, SubmitTaskRequest, SubmitTaskResponse,
     UploadArtifactRequest, UploadArtifactResponse,
 };
 
 /// Production implementation of AdminService backed by atomic ClusterScheduler.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AdminServiceImpl {
     scheduler: Arc<ClusterScheduler>,
     artifact_store: Arc<ArtifactStore>,
     artifact_base_url: String,
+    token_store: Arc<PairingTokenStore>,
+    ca_fingerprint: String,
+    cluster_endpoint: String,
 }
 
 impl AdminServiceImpl {
@@ -32,6 +37,9 @@ impl AdminServiceImpl {
             scheduler,
             artifact_store: Arc::new(ArtifactStore::new()),
             artifact_base_url: "http://127.0.0.1:50052".to_string(),
+            token_store: Arc::new(PairingTokenStore::default()),
+            ca_fingerprint: String::new(),
+            cluster_endpoint: "https://127.0.0.1:50051".to_string(),
         }
     }
 
@@ -47,6 +55,30 @@ impl AdminServiceImpl {
             scheduler,
             artifact_store,
             artifact_base_url,
+            token_store: Arc::new(PairingTokenStore::default()),
+            ca_fingerprint: String::new(),
+            cluster_endpoint: "https://127.0.0.1:50051".to_string(),
+        }
+    }
+
+    /// Constructs an AdminServiceImpl with full artifact and pairing subsystem injection.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn with_services(
+        scheduler: Arc<ClusterScheduler>,
+        artifact_store: Arc<ArtifactStore>,
+        artifact_base_url: String,
+        token_store: Arc<PairingTokenStore>,
+        ca_fingerprint: String,
+        cluster_endpoint: String,
+    ) -> Self {
+        Self {
+            scheduler,
+            artifact_store,
+            artifact_base_url,
+            token_store,
+            ca_fingerprint,
+            cluster_endpoint,
         }
     }
 }
@@ -203,6 +235,64 @@ impl AdminService for AdminServiceImpl {
             ))),
         }
     }
+
+    /// Generates an ephemeral pairing token and payload for worker node onboarding.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    async fn generate_pairing_token(
+        &self,
+        request: Request<GeneratePairingTokenRequest>,
+    ) -> Result<Response<GeneratePairingTokenResponse>, Status> {
+        let req = request.into_inner();
+        let target_node_id = if req.node_id.trim().is_empty() {
+            None
+        } else {
+            Some(req.node_id.trim().to_string())
+        };
+
+        let ttl = if req.expires_in_seconds > 0 {
+            Some(req.expires_in_seconds)
+        } else {
+            None
+        };
+
+        let record = self
+            .token_store
+            .generate_token(target_node_id.clone(), ttl)
+            .map_err(|e| Status::failed_precondition(e.to_string()))?;
+
+        let cluster_endpoint = if !req.san.trim().is_empty() {
+            let host = req.san.trim();
+            if host.starts_with("http://") || host.starts_with("https://") {
+                host.to_string()
+            } else {
+                format!("https://{host}")
+            }
+        } else {
+            self.cluster_endpoint.clone()
+        };
+
+        let payload = PairingPayload {
+            cluster_endpoint: cluster_endpoint.clone(),
+            ca_fingerprint: self.ca_fingerprint.clone(),
+            pairing_token: record.token.clone(),
+            node_id: target_node_id.clone(),
+            expires_at_epoch_s: record.expires_at_epoch_s,
+        };
+
+        let payload_json = payload
+            .to_compact_json()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        Ok(Response::new(GeneratePairingTokenResponse {
+            pairing_token: record.token,
+            cluster_endpoint,
+            ca_fingerprint: self.ca_fingerprint.clone(),
+            node_id: target_node_id.unwrap_or_default(),
+            expires_at_epoch_seconds: record.expires_at_epoch_s,
+            pairing_payload_json: payload_json,
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -320,5 +410,38 @@ mod tests {
         assert_eq!(nodes[0].node_id, "worker_alpha");
         assert_eq!(nodes[0].client_version, "0.1.0");
         assert_eq!(nodes[0].capabilities.as_ref().unwrap().cpu_cores, 8);
+    }
+
+    #[tokio::test]
+    async fn test_generate_pairing_token() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let token_store = Arc::new(PairingTokenStore::default());
+        let service = AdminServiceImpl::with_services(
+            scheduler,
+            Arc::new(ArtifactStore::new()),
+            "http://127.0.0.1:50052".to_string(),
+            Arc::clone(&token_store),
+            "fingerprint_12345".to_string(),
+            "https://10.0.0.1:50051".to_string(),
+        );
+
+        let req = GeneratePairingTokenRequest {
+            node_id: "test-node-pair".to_string(),
+            expires_in_seconds: 300,
+            san: "192.168.1.100:50051".to_string(),
+        };
+
+        let res = service
+            .generate_pairing_token(Request::new(req))
+            .await
+            .expect("Generate pairing token must succeed");
+
+        let inner = res.into_inner();
+        assert_eq!(inner.node_id, "test-node-pair");
+        assert_eq!(inner.ca_fingerprint, "fingerprint_12345");
+        assert_eq!(inner.cluster_endpoint, "https://192.168.1.100:50051");
+        assert_eq!(inner.pairing_token.len(), 64);
+        assert!(inner.pairing_payload_json.contains("test-node-pair"));
+        assert!(inner.pairing_payload_json.contains(&inner.pairing_token));
     }
 }

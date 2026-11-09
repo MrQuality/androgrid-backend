@@ -13,9 +13,9 @@ use std::time::SystemTime;
 
 use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
-    build_client_mtls_config, ArtifactPackager, CancelTaskRequest, ExecutionEngine,
-    GetTaskStatusRequest, ListWorkerNodesRequest, SubmitTaskRequest, TaskSpec, TaskState,
-    UploadArtifactRequest, WasiValidator,
+    build_client_mtls_config, export_png, render_ansi_qr, ArtifactPackager, CancelTaskRequest,
+    ExecutionEngine, GeneratePairingTokenRequest, GetTaskStatusRequest, ListWorkerNodesRequest,
+    SubmitTaskRequest, TaskSpec, TaskState, UploadArtifactRequest, WasiValidator,
 };
 
 #[derive(Parser, Debug)]
@@ -129,6 +129,26 @@ enum Commands {
         /// Task identifier
         task_id: String,
     },
+
+    /// Generate an ephemeral device pairing token and interactive terminal QR code
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    Pair {
+        /// Explicit node identifier to bind to this pairing token (optional)
+        #[arg(long)]
+        node_id: Option<String>,
+
+        /// Pairing token lifetime in seconds (default: 300)
+        #[arg(long, default_value_t = 300)]
+        expires_in: u32,
+
+        /// Subject Alternative Name (SAN) or public host/IP of the orchestrator
+        #[arg(long)]
+        san: Option<String>,
+
+        /// Optional output file path to save QR code as PNG image
+        #[arg(long)]
+        output_png: Option<PathBuf>,
+    },
 }
 
 /// Parses KEY=VALUE command-line strings into pairs.
@@ -203,6 +223,17 @@ struct CancelOutput {
     task_id: String,
     cancelled: bool,
     message: String,
+}
+
+#[derive(Serialize)]
+struct PairOutput {
+    pairing_token: String,
+    cluster_endpoint: String,
+    ca_fingerprint: String,
+    node_id: Option<String>,
+    expires_at_epoch_seconds: u64,
+    pairing_payload_json: String,
+    output_png: Option<String>,
 }
 
 fn task_state_to_string(state: i32) -> &'static str {
@@ -565,6 +596,80 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  Message:   {}", output.message);
             }
         }
+
+        Commands::Pair {
+            node_id,
+            expires_in,
+            san,
+            output_png,
+        } => {
+            let res = client
+                .generate_pairing_token(GeneratePairingTokenRequest {
+                    node_id: node_id.unwrap_or_default(),
+                    expires_in_seconds: expires_in,
+                    san: san.unwrap_or_default(),
+                })
+                .await?
+                .into_inner();
+
+            let target_node_id = if res.node_id.is_empty() {
+                None
+            } else {
+                Some(res.node_id.clone())
+            };
+
+            let png_path_str = if let Some(ref path) = output_png {
+                export_png(&res.pairing_payload_json, path)
+                    .map_err(|e| format!("Failed to export QR code PNG: {e}"))?;
+                Some(path.display().to_string())
+            } else {
+                None
+            };
+
+            let output = PairOutput {
+                pairing_token: res.pairing_token.clone(),
+                cluster_endpoint: res.cluster_endpoint.clone(),
+                ca_fingerprint: res.ca_fingerprint.clone(),
+                node_id: target_node_id.clone(),
+                expires_at_epoch_seconds: res.expires_at_epoch_seconds,
+                pairing_payload_json: res.pairing_payload_json.clone(),
+                output_png: png_path_str.clone(),
+            };
+
+            if cli.format == "json" {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else {
+                let qr_code = render_ansi_qr(&res.pairing_payload_json)
+                    .map_err(|e| format!("Failed to render ANSI QR code: {e}"))?;
+
+                println!("================================================================================");
+                println!("                      AndroGrid Device Pairing Engine                           ");
+                println!("================================================================================");
+                println!("Scan this QR code from the AndroGrid Android worker application:\n");
+                println!("{qr_code}\n");
+                println!("--------------------------------------------------------------------------------");
+                println!("Pairing Details (Manual Fallback):");
+                println!("  Endpoint:       {}", res.cluster_endpoint);
+                println!("  CA Fingerprint: {}", res.ca_fingerprint);
+                println!("  Pairing Token:  {}", res.pairing_token);
+                if let Some(ref id) = target_node_id {
+                    println!("  Bound Node ID:  {}", id);
+                } else {
+                    println!("  Bound Node ID:  (unbound: any new device)");
+                }
+                println!(
+                    "  Expires At:     epoch {} (TTL {}s)",
+                    res.expires_at_epoch_seconds, expires_in
+                );
+                if let Some(ref p) = png_path_str {
+                    println!("  QR Image PNG:   {}", p);
+                }
+                println!("--------------------------------------------------------------------------------");
+                println!("Raw Scannable Payload:");
+                println!("{}", res.pairing_payload_json);
+                println!("================================================================================");
+            }
+        }
     }
 
     Ok(())
@@ -760,5 +865,56 @@ mod tests {
             "2986333e9b06b321fefdec5227576a9c695c95a3a3fd442e0b20196d3e6a152b"
         );
         assert_eq!(bytecode.len(), 67);
+    }
+
+    #[test]
+    fn test_cli_parse_pair_default() {
+        let args = vec!["androgrid-cli", "pair"];
+        let cli = Cli::try_parse_from(args).expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Pair {
+                node_id,
+                expires_in,
+                san,
+                output_png,
+            } => {
+                assert_eq!(node_id, None);
+                assert_eq!(expires_in, 300);
+                assert_eq!(san, None);
+                assert_eq!(output_png, None);
+            }
+            _ => panic!("Expected Pair command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_pair_with_options() {
+        let args = vec![
+            "androgrid-cli",
+            "pair",
+            "--node-id",
+            "worker_pixel8",
+            "--expires-in",
+            "600",
+            "--san",
+            "cluster.edge.internal:50051",
+            "--output-png",
+            "/tmp/pairing_qr.png",
+        ];
+        let cli = Cli::try_parse_from(args).expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Pair {
+                node_id,
+                expires_in,
+                san,
+                output_png,
+            } => {
+                assert_eq!(node_id, Some("worker_pixel8".to_string()));
+                assert_eq!(expires_in, 600);
+                assert_eq!(san, Some("cluster.edge.internal:50051".to_string()));
+                assert_eq!(output_png, Some(PathBuf::from("/tmp/pairing_qr.png")));
+            }
+            _ => panic!("Expected Pair command"),
+        }
     }
 }

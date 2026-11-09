@@ -193,3 +193,73 @@ Output:
 ```text
 [+] Task task_c9f28a7e_41b3_4e89_a248_18a28f731e50 successfully cancelled.
 ```
+
+---
+
+### `androgrid-cli pair`
+
+Generates a time-bounded ephemeral device pairing token, renders an interactive high-contrast ANSI UTF-8 QR code directly in the terminal, and provides a textual fallback payload for zero-configuration Android worker node onboarding.
+
+Traceability: `[INV-002]`, `[NFR-SEC-001]`, `[REQ-OP-001]`.
+
+#### Parameter Specification
+
+| Option | Type | Required | Default | Detailed Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `--node-id <ID>` | String | No | None | Optional pre-assigned worker node identifier to bind strictly to this pairing session. |
+| `--expires-in <SECONDS>` | Integer | No | `300` | Pairing token lifetime in seconds (5 minutes by default). Enforces single-use expiry. |
+| `--san <HOST>` | String | No | None | Explicit orchestrator SAN domain or IP (e.g. `192.168.1.100:50051`) embedded into QR payload. |
+| `--output-png <PATH>` | File Path | No | None | Optional destination path to render and save the QR code as a standalone PNG image file. |
+
+#### Human-Readable Terminal Invocation (`--format text`)
+```bash
+androgrid-cli pair \
+  --node-id node_pixel_7_01 \
+  --expires-in 300 \
+  --output-png ./pairing_qr.png \
+  --format text
+```
+
+Expected Output:
+```text
+================================================================================
+                      AndroGrid Device Pairing Engine                           
+================================================================================
+Scan this QR code from the AndroGrid Android worker application:
+
+[ ANSI UTF-8 QR CODE MATRIX ]
+
+--------------------------------------------------------------------------------
+Pairing Details (Manual Fallback):
+  Endpoint:       https://127.0.0.1:50051
+  CA Fingerprint: 3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a
+  Pairing Token:  8a7f92e104b281f6d3910c2834b71940
+  Bound Node ID:  node_pixel_7_01
+  Expires At:     epoch 1700000300 (TTL 300s)
+  QR Image PNG:   ./pairing_qr.png
+--------------------------------------------------------------------------------
+Raw Scannable Payload:
+{"cluster_endpoint":"https://127.0.0.1:50051","ca_fingerprint":"3c79...","pairing_token":"8a7f...","node_id":"node_pixel_7_01","expires_at_epoch_s":1700000300}
+================================================================================
+```
+
+#### JSON Automation Invocation (`--format json`)
+```bash
+androgrid-cli pair \
+  --node-id node_pixel_7_01 \
+  --expires-in 300 \
+  --format json
+```
+
+Expected JSON Output:
+```json
+{
+  "pairing_token": "8a7f92e104b281f6d3910c2834b71940",
+  "cluster_endpoint": "https://127.0.0.1:50051",
+  "ca_fingerprint": "3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a",
+  "node_id": "node_pixel_7_01",
+  "expires_at_epoch_seconds": 1700000300,
+  "pairing_payload_json": "{\"cluster_endpoint\":\"https://127.0.0.1:50051\",\"ca_fingerprint\":\"3c79...\",\"pairing_token\":\"8a7f...\",\"node_id\":\"node_pixel_7_01\",\"expires_at_epoch_s\":1700000300}",
+  "output_png": null
+}
+```

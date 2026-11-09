@@ -11,8 +11,8 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto ./proto
 COPY src ./src
 
-# Compile production binary with release profile
-RUN cargo build --release --bin androgrid-backend
+# Compile production binaries with release profile
+RUN cargo build --release --bin androgrid-backend --bin androgrid-cli
 
 # Stage 2: Hardened, unprivileged runtime image
 FROM docker.io/library/debian:bookworm-slim AS runtime
@@ -28,11 +28,12 @@ RUN groupadd -g 10001 androgrid && \
 
 WORKDIR /app
 
-# Copy binary from builder stage
+# Copy binaries from builder stage
 COPY --from=builder /usr/src/androgrid-backend/target/release/androgrid-backend /usr/local/bin/androgrid-backend
+COPY --from=builder /usr/src/androgrid-backend/target/release/androgrid-cli /usr/local/bin/androgrid-cli
 
-# Ensure binary is owned by unprivileged user
-RUN chown -R androgrid:androgrid /app /usr/local/bin/androgrid-backend
+# Ensure binaries and working directory are owned by unprivileged user
+RUN chown -R androgrid:androgrid /app /usr/local/bin/androgrid-backend /usr/local/bin/androgrid-cli
 
 USER androgrid
 

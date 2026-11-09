@@ -9,6 +9,8 @@
 - [Cloudflare Ingress Deployment Guide](ingress/cloudflare_tunnel.md)
 - [Protobuf gRPC API Specification](api/protobuf.md)
 - [Architecture Decision Records](adr/ADR-001-documentation-portal.md)
+  - [ADR-001: Documentation Portal](adr/ADR-001-documentation-portal.md)
+  - [ADR-002: Release Automation](adr/ADR-002-release-automation.md)
 
 # Mobile Worker Client
 

@@ -13,9 +13,11 @@ use tracing::{error, info, warn};
 
 use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
+use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
 use androgrid_backend::{
     build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ArtifactServer,
-    ArtifactStore, ClusterConfig, ClusterScheduler, ThermalPolicy,
+    ArtifactStore, CaSigner, ClusterConfig, ClusterScheduler, EnrollmentContext,
+    EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]
@@ -81,15 +83,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let artifact_base_url = config.resolve_artifact_base_url();
 
+    let token_store = Arc::new(PairingTokenStore::new(config.allow_pairing, 5));
+
+    let (ca_signer, ca_fingerprint) = if let (Some(ca_cert_path), Some(ca_key_path)) =
+        (&config.tls_ca_cert_path, &config.tls_ca_key_path)
+    {
+        match (
+            tokio::fs::read_to_string(ca_cert_path).await,
+            tokio::fs::read_to_string(ca_key_path).await,
+        ) {
+            (Ok(ca_pem), Ok(ca_key)) => match CaSigner::from_pem(&ca_pem, &ca_key) {
+                Ok(signer) => {
+                    let fp = signer.ca_fingerprint().to_string();
+                    info!(ca_fingerprint = %fp, "Initialized Root CA CSR signer for pairing enrollment [INV-002]");
+                    (Some(Arc::new(signer)), fp)
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize Root CA signer; enrollment disabled");
+                    (None, String::new())
+                }
+            },
+            (Err(e), _) | (_, Err(e)) => {
+                warn!(error = %e, "Could not read Root CA cert or key; enrollment disabled");
+                (None, String::new())
+            }
+        }
+    } else {
+        (None, String::new())
+    };
+
+    let enrollment_ctx = ca_signer.as_ref().map(|signer| EnrollmentContext {
+        token_store: Arc::clone(&token_store),
+        signer: Arc::clone(signer),
+    });
+
     let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
     let service_server = AndroGridServiceServer::new(service)
         .max_decoding_message_size(config.max_frame_size_bytes)
         .max_encoding_message_size(config.max_frame_size_bytes);
 
-    let admin_service = AdminServiceImpl::with_artifact_store(
+    let cluster_endpoint = format!("https://{}", config.listen_addr);
+    let admin_service = AdminServiceImpl::with_services(
         Arc::clone(&scheduler),
         Arc::clone(&artifact_store),
         artifact_base_url,
+        Arc::clone(&token_store),
+        ca_fingerprint,
+        cluster_endpoint,
     );
     let admin_server = AdminServiceServer::new(admin_service)
         .max_decoding_message_size(config.max_frame_size_bytes)
@@ -99,11 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let artifact_listener = tokio::net::TcpListener::bind(config.artifact_listen_addr).await?;
     info!(
         artifact_addr = %config.artifact_listen_addr,
-        "Starting embedded HTTP static artifact server [NFR-PERF-001], [REQ-OP-003]"
+        "Starting embedded HTTP static artifact & enrollment server [NFR-PERF-001], [REQ-OP-001]"
     );
-    ArtifactServer::spawn(
+    ArtifactServer::spawn_with_enrollment(
         artifact_listener,
         Arc::clone(&artifact_store),
+        enrollment_ctx.clone(),
         artifact_shutdown_rx,
     );
 
@@ -138,9 +179,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = artifact_shutdown_tx.send(());
     };
 
-    server_builder
+    let mut router = server_builder
         .add_service(service_server)
-        .add_service(admin_server)
+        .add_service(admin_server);
+
+    if let Some(ctx) = enrollment_ctx {
+        let enrollment_service =
+            EnrollmentServiceImpl::new(Arc::clone(&ctx.token_store), Arc::clone(&ctx.signer));
+        let enrollment_server = EnrollmentServiceServer::new(enrollment_service)
+            .max_decoding_message_size(config.max_frame_size_bytes)
+            .max_encoding_message_size(config.max_frame_size_bytes);
+        router = router.add_service(enrollment_server);
+    }
+
+    router
         .serve_with_shutdown(config.listen_addr, shutdown_signal)
         .await?;
 

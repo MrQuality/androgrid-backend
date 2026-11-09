@@ -32,6 +32,17 @@ pub struct ClusterConfig {
     /// Optional path to server private key PEM.
     pub tls_server_key_path: Option<PathBuf>,
 
+    /// Optional path to Root CA private key PEM for worker CSR enrollment signing.
+    /// Traces to: [INV-002], [NFR-SEC-001]
+    pub tls_ca_key_path: Option<PathBuf>,
+
+    /// Whether ephemeral device pairing and bootstrap enrollment are enabled (default: true).
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub allow_pairing: bool,
+
+    /// Default lifetime in seconds for newly issued pairing tokens (default: 300s).
+    pub pairing_token_ttl_seconds: u32,
+
     /// Declarative heartbeat synchronization interval in seconds (default: 2s).
     pub heartbeat_interval_seconds: u32,
 
@@ -66,6 +77,9 @@ impl Default for ClusterConfig {
             tls_ca_cert_path: None,
             tls_server_cert_path: None,
             tls_server_key_path: None,
+            tls_ca_key_path: None,
+            allow_pairing: true,
+            pairing_token_ttl_seconds: 300,
             heartbeat_interval_seconds: 2,
             lease_timeout_seconds: 10,
             max_frame_size_bytes: MAX_FRAME_SIZE_BYTES,
@@ -109,6 +123,22 @@ impl ClusterConfig {
 
         if let Ok(val) = std::env::var("ANDROGRID_SERVER_KEY_PATH") {
             config.tls_server_key_path = Some(PathBuf::from(val));
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CA_KEY_PATH") {
+            config.tls_ca_key_path = Some(PathBuf::from(val));
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_ALLOW_PAIRING") {
+            config.allow_pairing = !val.eq_ignore_ascii_case("false") && val != "0";
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_PAIRING_TOKEN_TTL_SECS") {
+            config.pairing_token_ttl_seconds =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_PAIRING_TOKEN_TTL_SECS",
+                    val,
+                })?;
         }
 
         if let Ok(val) = std::env::var("ANDROGRID_HEARTBEAT_SECS") {
@@ -194,6 +224,8 @@ mod tests {
         assert_eq!(config.heartbeat_interval_seconds, 2);
         assert_eq!(config.lease_timeout_seconds, 10);
         assert_eq!(config.max_frame_size_bytes, 16 * 1024 * 1024);
+        assert!(config.allow_pairing);
+        assert_eq!(config.pairing_token_ttl_seconds, 300);
         assert!(!config.is_mtls_configured());
     }
 

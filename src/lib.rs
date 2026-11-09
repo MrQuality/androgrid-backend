@@ -28,6 +28,14 @@ pub use transport::*;
 pub mod config;
 pub use config::*;
 
+pub mod pairing;
+pub use pairing::{
+    export_png, render_ansi_qr, CaSigner, EnrollmentContext, EnrollmentServiceImpl,
+    HttpEnrollRequest, HttpEnrollResponse, PairingError, PairingPayload, PairingTokenRecord,
+    PairingTokenStore, SignedWorkerCert, SignerError, DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_PAIRING_TOKEN_TTL_SECONDS,
+};
+
 use thiserror::Error;
 
 /// Maximum allowable gRPC message frame payload bound in bytes (16 MB).

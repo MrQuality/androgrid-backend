@@ -51,6 +51,16 @@ impl ArtifactServer {
             .with_state(store)
     }
 
+    /// Builds the combined Axum router with artifact distribution and bootstrap pairing enrollment.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn router_with_enrollment(
+        store: Arc<ArtifactStore>,
+        enrollment_ctx: crate::pairing::EnrollmentContext,
+    ) -> Router {
+        Self::router(store).merge(crate::pairing::enrollment_http_router(enrollment_ctx))
+    }
+
     /// Handles GET and HEAD requests for content-addressed WebAssembly artifacts.
     ///
     /// Traces to: [NFR-PERF-001], [REQ-OP-003]
@@ -164,6 +174,34 @@ impl ArtifactServer {
                 .await
             {
                 error!("Embedded HTTP artifact server encountered error: {e}");
+            }
+        });
+    }
+
+    /// Spawns the combined artifact and bootstrap enrollment server on a specified TCP listener.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn spawn_with_enrollment(
+        listener: TcpListener,
+        store: Arc<ArtifactStore>,
+        enrollment_ctx: Option<crate::pairing::EnrollmentContext>,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let app = if let Some(ctx) = enrollment_ctx {
+            Self::router_with_enrollment(store, ctx)
+        } else {
+            Self::router(store)
+        };
+
+        tokio::spawn(async move {
+            info!("Starting embedded HTTP static artifact and bootstrap enrollment server...");
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+            {
+                error!("Embedded HTTP server encountered error: {e}");
             }
         });
     }

@@ -48,6 +48,21 @@ Atomically submits task execution results (exit code, stdout, stderr, execution 
 | `ListWorkerNodes` | `ListWorkerNodesRequest` | `ListWorkerNodesResponse` | List all registered worker nodes and hardware metrics |
 | `CancelTask` | `CancelTaskRequest` | `CancelTaskResponse` | Cancel a scheduled or actively running task |
 | `UploadArtifact` | `UploadArtifactRequest` | `UploadArtifactResponse` | Upload WASM bytecode to content-addressed storage |
+| `GeneratePairingToken` | `GeneratePairingTokenRequest` | `GeneratePairingTokenResponse` | Generate an ephemeral device pairing token and QR payload |
+
+---
+
+## Service: `EnrollmentService`
+
+`EnrollmentService` provides bootstrap enrollment for unprovisioned worker nodes exchanging an ephemeral pairing token and PKCS#10 CSR for an mTLS client certificate.
+
+Traceability: `[INV-002]`, `[NFR-SEC-001]`, `[REQ-OP-001]`.
+
+### Methods
+
+| RPC Method | Input Type | Output Type | Description |
+| :--- | :--- | :--- | :--- |
+| `EnrollWorker` | `EnrollWorkerRequest` | `EnrollWorkerResponse` | Redeem single-use pairing token and sign client CSR |
 
 ---
 

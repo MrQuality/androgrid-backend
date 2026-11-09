@@ -1,0 +1,225 @@
+# Multi-Platform Binary & Container Release Automation
+# Traces to: AG-SPEC-2026-V2, [REQ-OP-001], [REQ-OP-004], [NFR-SEC-001], [NFR-PERF-001]
+
+name: Release Automation
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Job 1: Cross-compile and package release binaries across 5 target platforms
+  build-binaries:
+    name: Build Binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            bin_ext: ""
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive_ext: tar.gz
+            bin_ext: ""
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive_ext: zip
+            bin_ext: ".exe"
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive_ext: tar.gz
+            bin_ext: ""
+            cross: false
+          - target: x86_64-apple-darwin
+            os: macos-13
+            archive_ext: tar.gz
+            bin_ext: ""
+            cross: false
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux Cross-Compilation Toolchain
+        if: matrix.cross && matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache Cargo Dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Compile Release Binaries (Unix Native / macOS)
+        if: "!matrix.cross && matrix.os != 'windows-latest'"
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin androgrid-backend --bin androgrid-cli
+
+      - name: Compile Release Binaries (Linux aarch64 Cross)
+        if: matrix.cross && matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin androgrid-backend --bin androgrid-cli
+
+      - name: Compile Release Binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo build --release --target ${{ matrix.target }} --bin androgrid-backend --bin androgrid-cli
+
+      - name: Prepare Staging Directory (Unix / macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p staging
+          cp "target/${{ matrix.target }}/release/androgrid-backend" staging/
+          cp "target/${{ matrix.target }}/release/androgrid-cli" staging/
+          cp README.md LICENSE staging/
+
+      - name: Prepare Staging Directory (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          New-Item -ItemType Directory -Force -Path staging
+          Copy-Item "target/${{ matrix.target }}/release/androgrid-backend.exe" -Destination staging/
+          Copy-Item "target/${{ matrix.target }}/release/androgrid-cli.exe" -Destination staging/
+          Copy-Item README.md -Destination staging/
+          Copy-Item LICENSE -Destination staging/
+
+      - name: Package Archive (.tar.gz)
+        if: matrix.archive_ext == 'tar.gz'
+        run: |
+          VERSION="${GITHUB_REF_NAME:-latest}"
+          ARCHIVE_NAME="androgrid-${VERSION}-${{ matrix.target }}.tar.gz"
+          tar -czvf "${ARCHIVE_NAME}" -C staging .
+          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          mkdir -p dist
+          mv "${ARCHIVE_NAME}" "${ARCHIVE_NAME}.sha256" dist/
+
+      - name: Package Archive (.zip)
+        if: matrix.archive_ext == 'zip'
+        run: |
+          $Version = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "latest" }
+          $ArchiveName = "androgrid-$Version-${{ matrix.target }}.zip"
+          Compress-Archive -Path staging/* -DestinationPath $ArchiveName
+          $Hash = (Get-FileHash -Algorithm SHA256 $ArchiveName).Hash.ToLower()
+          "$Hash  $ArchiveName" | Set-Content "$ArchiveName.sha256"
+          New-Item -ItemType Directory -Force -Path dist
+          Move-Item $ArchiveName dist/
+          Move-Item "$ArchiveName.sha256" dist/
+
+      - name: Upload Platform Release Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: artifacts-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Job 2: Consolidate SHA-256 digests and publish GitHub Release
+  publish-release:
+    name: Publish GitHub Release & SHA256SUMS
+    needs: [build-binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Download All Platform Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: download
+
+      - name: Consolidate Artifacts & Generate SHA256SUMS.txt
+        run: |
+          mkdir -p release_dist
+          find download -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release_dist/ \;
+          cd release_dist
+          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          echo "Generated SHA256SUMS.txt:"
+          cat SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${GITHUB_REF_NAME:-${GITHUB_SHA}}"
+          echo "Publishing release for version: ${VERSION}"
+          if gh release view "${VERSION}" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists. Uploading additional assets..."
+            gh release upload "${VERSION}" release_dist/* --clobber
+          else
+            gh release create "${VERSION}" release_dist/* \
+              --title "Release ${VERSION}" \
+              --notes "Production multi-platform release of AndroGrid control plane and CLI binaries. Verified under [REQ-OP-001], [REQ-OP-004], [NFR-SEC-001], and [NFR-PERF-001]."
+          fi
+
+  # Job 3: Multi-arch OCI Container Publishing to GitHub Container Registry (ghcr.io)
+  publish-container:
+    name: Build & Publish Multi-Arch Container (ghcr.io)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU Emulation
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract OCI Container Metadata & Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=AndroGrid Control Plane Orchestrator
+            org.opencontainers.image.description=High-concurrency Rust control plane for distributed mobile edge computing
+            org.opencontainers.image.vendor=AndroGrid Project
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and Push Multi-Arch Container Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

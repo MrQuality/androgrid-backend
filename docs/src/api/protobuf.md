@@ -49,6 +49,7 @@ Atomically submits task execution results (exit code, stdout, stderr, execution 
 | `CancelTask` | `CancelTaskRequest` | `CancelTaskResponse` | Cancel a scheduled or actively running task |
 | `UploadArtifact` | `UploadArtifactRequest` | `UploadArtifactResponse` | Upload WASM bytecode to content-addressed storage |
 | `GeneratePairingToken` | `GeneratePairingTokenRequest` | `GeneratePairingTokenResponse` | Generate an ephemeral device pairing token and QR payload |
+| `ListTasks` | `ListTasksRequest` | `ListTasksResponse` | List all known compute tasks and their lifecycle execution states |
 
 ---
 

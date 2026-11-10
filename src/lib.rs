@@ -39,6 +39,9 @@ pub use pairing::{
 pub mod benchmark;
 pub use benchmark::*;
 
+pub mod observability;
+pub use observability::*;
+
 use thiserror::Error;
 
 /// Maximum allowable gRPC message frame payload bound in bytes (16 MB).

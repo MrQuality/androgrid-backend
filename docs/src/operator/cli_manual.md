@@ -361,3 +361,38 @@ Expected JSON Output:
   ]
 }
 ```
+
+---
+
+### `androgrid-cli top`
+
+Launches an interactive, real-time terminal UI cluster monitor (powered by `ratatui` and `crossterm`) for visualizing connected worker nodes, hardware capabilities, task queues, and speculative preemption events.
+
+#### Traceability
+- Functional Requirements: `[REQ-OP-001]`, `[REQ-OP-004]`
+- System Invariants: `[INV-004]`, `[INV-005]`, `[NFR-REL-001]`
+
+#### Syntax & Options
+```text
+Usage: androgrid-cli top [OPTIONS]
+
+Options:
+      --refresh-rate <REFRESH_RATE>  Polling refresh interval in seconds [default: 1]
+      --endpoint <ENDPOINT>          gRPC control plane endpoint [default: https://127.0.0.1:50051]
+      --ca-cert <CA_CERT>            Path to root CA PEM certificate for mTLS
+      --client-cert <CLIENT_CERT>    Path to operator client PEM certificate for mTLS
+      --client-key <CLIENT_KEY>      Path to operator client private key PEM for mTLS
+  -h, --help                         Print help
+```
+
+#### Interactive Keybindings
+- `q`: Exit the terminal monitor cleanly, restoring terminal screen buffer and cursor.
+- `c`: Open task cancellation dialog to cancel a pending or leased task by ID.
+- `p`: Generate an ephemeral mobile node onboarding pairing token and display scannable payload.
+- `r`: Force an immediate telemetry refresh from the control plane.
+
+#### Example Invocation
+```bash
+androgrid-cli top --endpoint https://127.0.0.1:50051 --refresh-rate 1
+```
+

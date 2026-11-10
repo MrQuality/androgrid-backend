@@ -15,8 +15,9 @@ use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
     build_client_mtls_config, export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig,
     BenchmarkDispatcher, BenchmarkFilter, CancelTaskRequest, ExecutionEngine,
-    GeneratePairingTokenRequest, GetTaskStatusRequest, ListWorkerNodesRequest, SubmitTaskRequest,
-    TaskSpec, TaskState, UploadArtifactRequest, WasiValidator,
+    GeneratePairingTokenRequest, GetTaskStatusRequest, ListTasksRequest, ListWorkerNodesRequest,
+    SubmitTaskRequest, TaskSpec, TaskState, TerminalGuard, TuiAction, TuiApp,
+    UploadArtifactRequest, WasiValidator,
 };
 
 #[derive(Parser, Debug)]
@@ -194,6 +195,14 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Interactive real-time terminal cluster monitor
+    /// Traces to: [INV-004], [INV-005], [NFR-REL-001]
+    Top {
+        /// Polling refresh interval in seconds (default: 1)
+        #[arg(long, default_value_t = 1)]
+        refresh_rate: u64,
+    },
 }
 
 /// Parses KEY=VALUE command-line strings into pairs.
@@ -341,6 +350,95 @@ async fn create_channel(
     Ok(channel)
 }
 
+/// Runs the interactive terminal observability UI event loop.
+///
+/// Traces to: [INV-004], [INV-005], [NFR-REL-001]
+async fn run_top(
+    mut client: AdminServiceClient<tonic::transport::Channel>,
+    endpoint: &str,
+    refresh_rate_secs: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = TerminalGuard::init()?;
+    let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+    let mut terminal = ratatui::Terminal::new(backend)?;
+
+    let mut app = TuiApp::new(endpoint.to_string());
+
+    let tick_rate = std::time::Duration::from_secs(refresh_rate_secs.max(1));
+    let mut last_fetch = std::time::Instant::now() - tick_rate;
+
+    loop {
+        if last_fetch.elapsed() >= tick_rate {
+            if let Ok(res_nodes) = client.list_worker_nodes(ListWorkerNodesRequest {}).await {
+                if let Ok(res_tasks) = client
+                    .list_tasks(ListTasksRequest { state_filter: 0 })
+                    .await
+                {
+                    app.update_from_nodes_and_tasks(
+                        res_nodes.into_inner().nodes,
+                        res_tasks.into_inner().tasks,
+                    );
+                }
+            }
+            last_fetch = std::time::Instant::now();
+        }
+
+        terminal.draw(|f| app.render(f))?;
+
+        if crossterm::event::poll(std::time::Duration::from_millis(200))? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                if let Some(action) = app.handle_key(key) {
+                    match action {
+                        TuiAction::Quit => break,
+                        TuiAction::CancelTask(task_id) => {
+                            match client
+                                .cancel_task(CancelTaskRequest {
+                                    task_id: task_id.clone(),
+                                })
+                                .await
+                            {
+                                Ok(_) => app.set_status(format!("Task '{task_id}' cancelled")),
+                                Err(e) => app.set_status(format!("Cancel failed: {}", e.message())),
+                            }
+                            last_fetch = std::time::Instant::now() - tick_rate;
+                        }
+                        TuiAction::GeneratePairingToken => {
+                            match client
+                                .generate_pairing_token(GeneratePairingTokenRequest {
+                                    node_id: String::new(),
+                                    expires_in_seconds: 300,
+                                    san: String::new(),
+                                })
+                                .await
+                            {
+                                Ok(res) => {
+                                    let inner = res.into_inner();
+                                    app.show_pairing_info(format!(
+                                        "Token: {}\nCluster Endpoint: {}\nExpires in: 300s",
+                                        inner.pairing_token, inner.cluster_endpoint
+                                    ));
+                                }
+                                Err(e) => {
+                                    app.set_status(format!("Pairing failed: {}", e.message()))
+                                }
+                            }
+                        }
+                        TuiAction::Refresh => {
+                            last_fetch = std::time::Instant::now() - tick_rate;
+                        }
+                    }
+                }
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -449,6 +547,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Pack { .. } => unreachable!(),
         Commands::Benchmark { .. } => unreachable!(),
+
+        Commands::Top { refresh_rate } => {
+            run_top(client, &cli.endpoint, refresh_rate).await?;
+        }
 
         Commands::Submit {
             task_id,
@@ -919,6 +1021,18 @@ mod tests {
         match cli.command {
             Commands::Nodes => {}
             _ => panic!("Expected Nodes command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_top() {
+        let args = vec!["androgrid-cli", "top", "--refresh-rate", "3"];
+        let cli = Cli::try_parse_from(args).expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Top { refresh_rate } => {
+                assert_eq!(refresh_rate, 3);
+            }
+            _ => panic!("Expected Top command"),
         }
     }
 

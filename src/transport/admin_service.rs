@@ -14,9 +14,9 @@ use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
 use crate::{
     CancelTaskRequest, CancelTaskResponse, GeneratePairingTokenRequest,
-    GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse,
-    ListWorkerNodesRequest, ListWorkerNodesResponse, SubmitTaskRequest, SubmitTaskResponse,
-    UploadArtifactRequest, UploadArtifactResponse,
+    GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTasksRequest,
+    ListTasksResponse, ListWorkerNodesRequest, ListWorkerNodesResponse, SubmitTaskRequest,
+    SubmitTaskResponse, TaskState, UploadArtifactRequest, UploadArtifactResponse,
 };
 
 /// Production implementation of AdminService backed by atomic ClusterScheduler.
@@ -169,6 +169,23 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<ListWorkerNodesResponse>, Status> {
         let nodes = self.scheduler.list_worker_nodes();
         Ok(Response::new(ListWorkerNodesResponse { nodes }))
+    }
+
+    /// Lists all known compute tasks and their lifecycle execution states.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004], [INV-005]
+    async fn list_tasks(
+        &self,
+        request: Request<ListTasksRequest>,
+    ) -> Result<Response<ListTasksResponse>, Status> {
+        let req = request.into_inner();
+        let state_filter = if req.state_filter == 0 {
+            None
+        } else {
+            TaskState::try_from(req.state_filter).ok()
+        };
+        let tasks = self.scheduler.list_tasks(state_filter);
+        Ok(Response::new(ListTasksResponse { tasks }))
     }
 
     /// Cancels a scheduled or running task.

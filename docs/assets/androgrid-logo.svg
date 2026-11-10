@@ -1,0 +1,314 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="100%" height="100%">
+  <defs>
+    <!-- Background Canvas Color -->
+    <radialGradient id="androGridBg" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="#283339" />
+      <stop offset="100%" stop-color="#1F272C" />
+    </radialGradient>
+
+    <!-- Global Emerald-to-Cyan Color Transition -->
+    <linearGradient id="gridGrad" x1="28%" y1="0%" x2="72%" y2="0%">
+      <stop offset="0%" stop-color="#4FDC68" />
+      <stop offset="48%" stop-color="#25D69F" />
+      <stop offset="52%" stop-color="#12D0CF" />
+      <stop offset="100%" stop-color="#09D2EE" />
+    </linearGradient>
+
+    <!-- Subtle Optical Glow for Nodes and Eyes -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="2.5" result="blur" />
+      <feMerge>
+        <feMergeNode in="blur" />
+        <feMergeNode in="SourceGraphic" />
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Dark Slate Background Canvas -->
+  <rect width="1024" height="1024" rx="48" fill="url(#androGridBg)" />
+
+  <!-- ============================================================== -->
+  <!-- 1. HEAD & ANTENNAE                                            -->
+  <!-- ============================================================== -->
+  <g id="head-section">
+    <!-- Antennae -->
+    <g stroke="url(#gridGrad)" stroke-width="6.5" stroke-linecap="round">
+      <line x1="414" y1="233" x2="442" y2="303" />
+      <line x1="610" y1="233" x2="582" y2="303" />
+    </g>
+
+    <!-- Head Semicircle Outline (Center 511.5, 401 | Radius ~150) -->
+    <path d="M 361.4,401.0 A 150.1,150.1 0 0,1 661.6,401.0 Z" fill="none" stroke="url(#gridGrad)" stroke-width="6.5" stroke-linejoin="round" />
+
+    <!-- Head Internal Wireframe & Spoke Lines -->
+    <g stroke="url(#gridGrad)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Left Symmetrical & Grid Struts -->
+      <line x1="444.2" y1="340.3" x2="398.8" y2="314.8" />
+      <line x1="444.2" y1="340.3" x2="444.2" y2="258.0" />
+      <line x1="444.2" y1="340.3" x2="511.7" y2="264.9" />
+      <line x1="444.2" y1="340.3" x2="444.2" y2="401.0" />
+      <line x1="444.2" y1="340.3" x2="511.9" y2="338.4" />
+      <line x1="444.2" y1="340.3" x2="474.2" y2="368.4" />
+      <line x1="398.8" y1="314.8" x2="361.4" y2="401.0" />
+      <line x1="398.8" y1="314.8" x2="444.2" y2="258.0" />
+      <line x1="398.8" y1="314.8" x2="400.0" y2="401.0" />
+      <line x1="474.2" y1="368.4" x2="444.2" y2="401.0" />
+      <line x1="474.2" y1="368.4" x2="511.5" y2="401.0" />
+
+      <!-- Center Vertical Divider -->
+      <line x1="511.7" y1="264.9" x2="511.5" y2="401.0" />
+
+      <!-- Right Mesh Struts -->
+      <line x1="578.7" y1="340.3" x2="511.7" y2="264.9" />
+      <line x1="578.7" y1="340.3" x2="578.7" y2="258.0" />
+      <line x1="578.7" y1="340.3" x2="511.9" y2="338.4" />
+      <line x1="578.7" y1="340.3" x2="545.7" y2="368.7" />
+      <line x1="578.7" y1="340.3" x2="578.7" y2="401.0" />
+      <line x1="578.7" y1="340.3" x2="624.3" y2="314.8" />
+      <line x1="578.7" y1="340.3" x2="622.8" y2="368.8" />
+      <line x1="511.7" y1="264.9" x2="624.3" y2="314.8" />
+      <line x1="624.3" y1="314.8" x2="661.6" y2="400.8" />
+      <line x1="624.3" y1="314.8" x2="622.8" y2="368.8" />
+      <line x1="622.8" y1="368.8" x2="661.6" y2="400.8" />
+      <line x1="545.7" y1="368.7" x2="511.5" y2="401.0" />
+      <line x1="545.7" y1="368.7" x2="578.7" y2="401.0" />
+      <line x1="622.8" y1="368.8" x2="578.7" y2="401.0" />
+    </g>
+
+    <!-- Head Perimeter & Junction Nodes -->
+    <g fill="#1F272C" stroke-width="3">
+      <circle cx="361.4" cy="401.1" r="8" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="398.8" cy="314.8" r="8" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="511.7" cy="264.9" r="8" fill="#12D0CF" stroke="#12D0CF" />
+      <circle cx="624.3" cy="314.8" r="8" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="661.6" cy="400.8" r="8" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="511.9" cy="338.4" r="5" fill="#25D69F" stroke="#25D69F" />
+      <circle cx="545.7" cy="368.7" r="6" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="622.8" cy="368.8" r="6" fill="#09D2EE" stroke="#09D2EE" />
+    </g>
+
+    <!-- ==================== THE EYES ==================== -->
+    <!-- Large Solid Round Eyes (Emerald Left & Cyan Right) -->
+    <circle cx="444.2" cy="340.3" r="14.5" fill="#52DC63" filter="url(#softGlow)" />
+    <circle cx="578.7" cy="340.3" r="14.5" fill="#09D3EB" filter="url(#softGlow)" />
+  </g>
+
+  <!-- ============================================================== -->
+  <!-- 2. ARMS (LEFT & RIGHT CAPSULES)                                -->
+  <!-- ============================================================== -->
+  <g id="arms-section">
+    <!-- Left Arm Capsule (x: 276.3 to 338.0 | y: 420.0 to 626.4) -->
+    <path d="M 276.3,450.8 A 30.8,30.8 0 0,1 338.0,450.8 L 338.0,595.6 A 30.8,30.8 0 0,1 276.3,595.6 Z" fill="none" stroke="#4FDC68" stroke-width="6" stroke-linejoin="round" />
+    
+    <!-- Left Arm Internal Network Grid -->
+    <g stroke="#4FDC68" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="307.5" y1="420.0" x2="307.5" y2="626.4" />
+      <line x1="276.3" y1="444.7" x2="338.0" y2="444.7" />
+      <line x1="276.3" y1="444.7" x2="307.4" y2="471.0" />
+      <line x1="276.3" y1="530.0" x2="338.0" y2="530.0" />
+      <line x1="307.4" y1="471.0" x2="276.3" y2="530.0" />
+      <line x1="276.3" y1="602.4" x2="307.1" y2="575.5" />
+      <line x1="307.1" y1="575.5" x2="338.0" y2="599.1" />
+      <line x1="276.3" y1="602.4" x2="307.5" y2="626.4" />
+      <line x1="338.0" y1="599.1" x2="307.5" y2="626.4" />
+      <!-- Interconnect Bus Line from Left Arm into Torso -->
+      <line x1="338.0" y1="514.5" x2="361.0" y2="514.5" />
+    </g>
+
+    <!-- Left Arm Nodes -->
+    <g fill="#4FDC68">
+      <circle cx="307.6" cy="420.0" r="7.5" />
+      <circle cx="276.3" cy="444.7" r="7.5" />
+      <circle cx="307.4" cy="471.0" r="6" />
+      <circle cx="307.1" cy="575.5" r="6.5" />
+      <circle cx="276.3" cy="602.4" r="7.5" />
+      <circle cx="338.0" cy="599.1" r="7.5" />
+      <circle cx="307.5" cy="626.4" r="7.5" />
+    </g>
+
+    <!-- Right Arm Capsule (x: 684.4 to 746.7 | y: 419.9 to 626.3) -->
+    <path d="M 684.4,450.8 A 30.8,30.8 0 0,1 746.7,450.8 L 746.7,595.6 A 30.8,30.8 0 0,1 684.4,595.6 Z" fill="none" stroke="#09D2EE" stroke-width="6" stroke-linejoin="round" />
+    
+    <!-- Right Arm Internal Network Mesh -->
+    <g stroke="#09D2EE" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="716.0" y1="419.9" x2="716.0" y2="626.3" />
+      <line x1="716.0" y1="419.9" x2="746.6" y2="444.7" />
+      <line x1="684.4" y1="444.7" x2="746.6" y2="444.7" />
+      <line x1="746.6" y1="444.7" x2="715.6" y2="471.2" />
+      <line x1="715.6" y1="471.2" x2="746.3" y2="522.8" />
+      <line x1="684.4" y1="522.8" x2="746.3" y2="522.8" />
+      <line x1="684.4" y1="587.6" x2="715.7" y2="575.4" />
+      <line x1="715.7" y1="575.4" x2="746.7" y2="602.3" />
+      <line x1="684.4" y1="587.6" x2="715.9" y2="626.3" />
+      <line x1="746.7" y1="602.3" x2="715.9" y2="626.3" />
+      <!-- Interconnect Bus Line from Torso into Right Arm -->
+      <line x1="661.6" y1="471.2" x2="684.4" y2="471.2" />
+    </g>
+
+    <!-- Right Arm Nodes -->
+    <g fill="#09D2EE">
+      <circle cx="716.0" cy="419.9" r="7.5" />
+      <circle cx="746.6" cy="444.7" r="7.5" />
+      <circle cx="715.6" cy="471.2" r="6" />
+      <circle cx="746.3" cy="522.8" r="8" />
+      <circle cx="715.7" cy="575.4" r="6.5" />
+      <circle cx="684.4" cy="587.6" r="7.5" />
+      <circle cx="746.7" cy="602.3" r="7.5" />
+      <circle cx="715.9" cy="626.3" r="7.5" />
+    </g>
+  </g>
+
+  <!-- ============================================================== -->
+  <!-- 3. TORSO (CARTESIAN GRID TO TRIANGULATED MESH)                 -->
+  <!-- ============================================================== -->
+  <g id="torso-section">
+    <!-- Torso Outer Contour (Top: 424.8 | Bottom: ~643.0 | Width: 361.0 to 661.8) -->
+    <path d="M 361.0,424.8 L 661.8,424.8 L 661.8,610.0 A 33,33 0 0,1 628.8,643.0 L 394.0,643.0 A 33,33 0 0,1 361.0,610.0 Z" fill="none" stroke="url(#gridGrad)" stroke-width="6.5" stroke-linejoin="round" />
+
+    <!-- Left Torso: Regular Cartesian Grid -->
+    <g stroke="#4FDC68" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Verticals (Spacing ~38px) -->
+      <line x1="399.0" y1="424.8" x2="399.0" y2="559.3" />
+      <line x1="435.9" y1="424.8" x2="435.9" y2="559.3" />
+      <line x1="473.6" y1="424.8" x2="473.6" y2="559.3" />
+      
+      <!-- Horizontals -->
+      <line x1="361.0" y1="470.0" x2="511.6" y2="470.0" />
+      <line x1="361.0" y1="514.5" x2="511.8" y2="514.5" />
+      <line x1="361.0" y1="559.3" x2="473.6" y2="559.3" />
+    </g>
+
+    <!-- Center Spine & Transition Circuit Lines -->
+    <g stroke="url(#gridGrad)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="511.6" y1="424.8" x2="511.8" y2="514.3" />
+      <line x1="511.8" y1="514.3" x2="511.5" y2="608.2" />
+      <line x1="511.5" y1="608.2" x2="511.5" y2="643.0" />
+    </g>
+
+    <!-- Right & Lower Torso: Triangulated Computing Mesh -->
+    <g stroke="url(#gridGrad)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+      <!-- Upper-Right Diagonal Trusses -->
+      <line x1="511.6" y1="424.8" x2="556.2" y2="470.4" />
+      <line x1="511.6" y1="424.8" x2="601.7" y2="424.8" />
+      <line x1="601.7" y1="424.8" x2="556.2" y2="470.4" />
+      <line x1="601.7" y1="424.8" x2="661.8" y2="470.2" />
+      <line x1="601.7" y1="424.8" x2="616.1" y2="470.2" />
+      <line x1="556.2" y1="470.4" x2="616.1" y2="470.2" />
+      <line x1="616.1" y1="470.2" x2="661.8" y2="470.2" />
+      <line x1="511.8" y1="514.3" x2="556.2" y2="470.4" />
+      <line x1="556.2" y1="470.4" x2="579.8" y2="514.4" />
+      <line x1="511.8" y1="514.3" x2="579.8" y2="514.4" />
+      <line x1="579.8" y1="514.4" x2="614.1" y2="546.3" />
+      <line x1="616.1" y1="470.2" x2="661.8" y2="560.7" />
+      <line x1="614.1" y1="546.3" x2="661.8" y2="560.7" />
+
+      <!-- Lower Torso Network & Angular Struts -->
+      <line x1="473.6" y1="559.3" x2="511.8" y2="514.3" />
+      <line x1="473.6" y1="559.3" x2="559.0" y2="563.1" />
+      <line x1="511.8" y1="514.3" x2="559.0" y2="563.1" />
+      <line x1="579.8" y1="514.4" x2="559.0" y2="563.1" />
+      <line x1="559.0" y1="563.1" x2="614.1" y2="546.3" />
+      <line x1="559.0" y1="563.1" x2="631.5" y2="622.0" />
+      <line x1="614.1" y1="546.3" x2="631.5" y2="622.0" />
+      <line x1="661.8" y1="560.7" x2="631.5" y2="622.0" />
+      <line x1="511.5" y1="608.2" x2="559.0" y2="563.1" />
+      <line x1="511.5" y1="608.2" x2="631.5" y2="622.0" />
+      <line x1="631.5" y1="622.0" x2="569.8" y2="642.9" />
+      
+      <!-- Bottom-Left Transition Mesh -->
+      <line x1="361.0" y1="601.2" x2="435.8" y2="596.2" />
+      <line x1="399.0" y1="559.3" x2="435.8" y2="596.2" />
+      <line x1="473.6" y1="559.3" x2="435.8" y2="596.2" />
+      <line x1="435.8" y1="596.2" x2="511.5" y2="608.2" />
+      <line x1="435.8" y1="596.2" x2="398.1" y2="635.1" />
+      <line x1="435.8" y1="596.2" x2="453.4" y2="643.2" />
+      <line x1="511.5" y1="608.2" x2="453.4" y2="643.2" />
+      <line x1="511.5" y1="608.2" x2="569.8" y2="642.9" />
+      <line x1="361.0" y1="601.2" x2="398.1" y2="635.1" />
+    </g>
+
+    <!-- Torso Network Nodes -->
+    <g fill="#1F272C" stroke-width="2.5">
+      <!-- Upper Cartesian Nodes (Emerald) -->
+      <circle cx="399.0" cy="470.0" r="8" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="435.9" cy="514.5" r="8" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="473.6" cy="559.3" r="8" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="360.8" cy="601.2" r="8" fill="#4FDC68" stroke="#4FDC68" />
+
+      <!-- Center Spine Nodes -->
+      <circle cx="511.6" cy="424.8" r="8" fill="#12D0CF" stroke="#12D0CF" />
+      <circle cx="511.8" cy="514.3" r="8.5" fill="#12D0CF" stroke="#12D0CF" />
+      <circle cx="511.5" cy="608.2" r="8.5" fill="#25D69F" stroke="#25D69F" />
+
+      <!-- Transition & Right Mesh Nodes -->
+      <circle cx="601.7" cy="424.8" r="7.5" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="556.2" cy="470.4" r="6" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="616.1" cy="470.2" r="5" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="579.8" cy="514.4" r="6" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="614.1" cy="546.3" r="5.5" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="661.8" cy="560.7" r="8" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="559.0" cy="563.1" r="6" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="435.8" cy="596.2" r="8" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="631.5" cy="622.0" r="6.5" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="398.1" cy="635.1" r="6" fill="#09D2EE" stroke="#09D2EE" />
+      <circle cx="453.4" cy="643.2" r="6" fill="#4FDC68" stroke="#4FDC68" />
+      <circle cx="569.8" cy="642.9" r="6" fill="#09D2EE" stroke="#09D2EE" />
+    </g>
+  </g>
+
+  <!-- ============================================================== -->
+  <!-- 4. LEGS (LEFT & RIGHT CAPSULES)                                -->
+  <!-- ============================================================== -->
+  <g id="legs-section">
+    <!-- Left Leg Capsule (Center x: 453.0 | y: 643.2 to 784.8) -->
+    <path d="M 420.8,643.2 L 485.2,643.2 L 485.2,752.6 A 32.2,32.2 0 0,1 420.8,752.6 Z" fill="none" stroke="#4FDC68" stroke-width="6" stroke-linejoin="round" />
+    
+    <!-- Left Leg Spider-Truss Wireframe -->
+    <g stroke="#4FDC68" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="453.0" y1="643.2" x2="453.0" y2="784.8" />
+      <line x1="420.8" y1="680.0" x2="485.2" y2="680.0" />
+      <line x1="453.0" y1="643.2" x2="420.8" y2="680.0" />
+      <line x1="453.0" y1="643.2" x2="485.2" y2="680.0" />
+      <line x1="420.8" y1="680.0" x2="453.0" y2="728.1" />
+      <line x1="485.2" y1="680.0" x2="453.0" y2="728.1" />
+      <line x1="453.0" y1="728.1" x2="420.8" y2="761.8" />
+      <line x1="453.0" y1="728.1" x2="485.2" y2="761.8" />
+      <line x1="453.0" y1="728.1" x2="453.1" y2="784.8" />
+      <line x1="420.8" y1="761.8" x2="453.1" y2="784.8" />
+      <line x1="485.2" y1="761.8" x2="453.1" y2="784.8" />
+    </g>
+
+    <!-- Left Leg Nodes -->
+    <g fill="#4FDC68">
+      <circle cx="453.0" cy="728.1" r="7" />
+      <circle cx="420.8" cy="761.8" r="7.5" />
+      <circle cx="453.1" cy="784.8" r="7.5" />
+    </g>
+
+    <!-- Right Leg Capsule (Center x: 570.0 | y: 642.9 to 784.8) -->
+    <path d="M 537.8,642.9 L 602.2,642.9 L 602.2,752.6 A 32.2,32.2 0 0,1 537.8,752.6 Z" fill="none" stroke="#09D2EE" stroke-width="6" stroke-linejoin="round" />
+    
+    <!-- Right Leg Spider-Truss Wireframe -->
+    <g stroke="#09D2EE" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="570.0" y1="642.9" x2="570.0" y2="784.8" />
+      <line x1="537.8" y1="680.0" x2="602.2" y2="680.0" />
+      <line x1="570.0" y1="642.9" x2="537.8" y2="680.0" />
+      <line x1="570.0" y1="642.9" x2="602.2" y2="680.0" />
+      <line x1="537.8" y1="680.0" x2="570.0" y2="727.9" />
+      <line x1="602.2" y1="680.0" x2="570.0" y2="727.9" />
+      <line x1="570.0" y1="727.9" x2="537.9" y2="761.9" />
+      <line x1="570.0" y1="727.9" x2="602.2" y2="761.9" />
+      <line x1="570.0" y1="727.9" x2="570.3" y2="784.8" />
+      <line x1="537.9" y1="761.9" x2="570.3" y2="784.8" />
+      <line x1="602.2" y1="761.9" x2="570.3" y2="784.8" />
+    </g>
+
+    <!-- Right Leg Nodes -->
+    <g fill="#09D2EE">
+      <circle cx="570.0" cy="727.9" r="7" />
+      <circle cx="537.9" cy="761.9" r="7.5" />
+      <circle cx="602.2" cy="761.9" r="7.5" />
+      <circle cx="570.3" cy="784.8" r="7.5" />
+    </g>
+  </g>
+</svg>

@@ -1,29 +1,29 @@
-# ADR-004: Community Showcase, Interactive Demo Assets & Hardware Feasibility FAQ
+# ADR-004: Interactive Cluster Demo Assets & Hardware Feasibility FAQ
 
 ## Status
 Accepted
 
 ## Architectural Scope & Requirements
-- **Goal Reference:** G-21
+- **Feature Reference:** Issue #28
 - **Traceability:** `[REQ-PUB-001]`, `[NFR-POW-001]`, `[ANTI-001]`
 - **Standard:** ISO/IEC/IEEE 29148
 
 ---
 
 ## Context
-A technically sophisticated distributed edge-compute platform faces community skepticism upon initial public presentation. Developers browsing forums such as Hacker News, Reddit, and Lobste.rs typically apply a 30-second attention filter. Without immediate visual proof and clear, empirical answers to common objections ("Doesn't this burn phone batteries?", "Why not use a Raspberry Pi?", "Is this crypto-mining?"), readers dismiss the project.
+Deploying distributed compute workloads across heterogeneous mobile devices introduces evaluation friction for systems engineers and operators. Without direct visual verification of cluster lifecycle mechanics and empirical answers to hardware feasibility questions (such as battery longevity, thermal throttling, and sandboxing boundaries), prospective operators face high uncertainty during technical evaluation.
 
 Key engineering requirements:
 1. **Visual Demonstration (`[REQ-PUB-001]`):** Provide a compact, end-to-end animated demonstration showing orchestrator startup, device enrollment, workload execution, and progress bars.
 2. **Asset Size Bounds:** Media assets must not inflate repository clone sizes. The demo asset must stay strictly under 5 MB.
 3. **Empirical Rationale:** FAQ claims must cite verified architectural invariants: 80% charging limits, 38 C / 35 C thermal hysteresis (`ThermalSafetyGuard`), 200 ms cellular socket teardown (`[NFR-POW-001]`), and zero keepalive (`[ANTI-001]`).
-4. **Ecosystem Navigation:** Present a unified architectural map linking `androgrid-backend`, `androgrid-android`, and `AndroGrid_SDD.md`.
+4. **Ecosystem Navigation:** Present a unified architectural map linking `androgrid-backend`, `androgrid-android`, and normative specification contracts (`AG-SPEC-2026-V2`).
 5. **Typographic Standard:** Zero occurrences of Unicode em dashes (U+2014) or en dashes (U+2013).
 
 ---
 
 ## Decision
-We implement a four-part Community Showcase subsystem within the public documentation portal and root repository assets:
+We implement an integrated documentation and visual feasibility subsystem within the public documentation portal and root repository assets:
 
 1. **High-Resolution Animated Demonstration Asset (`docs/assets/demo.gif`):**
    - Programmatically generated using a headless PIL rendering engine (`tools/docs/generate_demo_gif.py`).
@@ -33,19 +33,18 @@ We implement a four-part Community Showcase subsystem within the public document
    - Directly tackles battery longevity (80% charge ceiling, SEI layer mitigation), thermal hysteresis (38 C cutoff, 35 C resume), and comparative efficiency against Raspberry Pi and x86 hardware.
    - Highlights ARM big.LITTLE power efficiency (15-50 mW idle sleep vs 3-4W RPi idle) and built-in hardware peripherals (UPS battery, Wi-Fi 6, hardware crypto).
 3. **Ecosystem Architecture & Navigation Portal (`docs/src/showcase/ecosystem.md`):**
-   - Unifies the three core pillars: Control Plane (`androgrid-backend`), Mobile Client (`androgrid-android`), and Master Specification (`AndroGrid_SDD.md`).
+   - Unifies the core pillars: Control Plane (`androgrid-backend`), Mobile Client (`androgrid-android`), and System Architecture Specification (`AG-SPEC-2026-V2`).
    - Embeds a Mermaid flowchart detailing component interactions and cross-links to the interactive Dokka API reference.
-4. **Separation of Community Blueprints & Private Repository Boundary:**
-   - Publication templates and forum drafts are maintained strictly within private operator repositories (`androgrid-private`), keeping public documentation focused exclusively on technical architecture and hardware feasibility.
+4. **Separation of Operational Blueprints:**
+   - External promotional materials and forum drafts are maintained strictly within external operator notes, keeping public documentation focused exclusively on technical architecture, protocol contracts, and hardware feasibility.
 
 ---
 
 ## Consequences
 - **Positive:**
-  - Solves the 30-second attention challenge with embedded visual demonstrations in root README files.
-  - Proactively transforms skeptical developers into informed contributors through empirical hardware data.
+  - Provides immediate cluster lifecycle observability with embedded visual demonstrations in root README files.
+  - Equips developers and operators with empirical hardware data and verifiable safety invariants.
   - Keeps repository clone size minimal (< 200 KB for all media assets).
   - Maintains strict traceability to ISO 29148 requirements and AG-SPEC-2026-V2 invariants.
-  - Preserves clean public repository boundaries by isolating promotional blueprints to private storage.
 - **Trade-offs:**
   - Dynamic animated GIF generation must be rerun if CLI or dashboard interfaces evolve.

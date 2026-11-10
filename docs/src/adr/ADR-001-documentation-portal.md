@@ -4,14 +4,14 @@
 Accepted
 
 ## Architectural Scope & Requirements
-- **Goal Reference:** G-14
+- **Feature Reference:** Issue #10
 - **Traceability:** `[NFR-DOC-001]`, `[REQ-PUB-001]`
 - **Standard:** ISO/IEC/IEEE 29148
 
 ---
 
 ## Context
-Project documentation previously existed across fragmented files (`README.md`, `AndroGrid_SDD.md`, and code docstrings). External operators, contributors, and systems engineers required a centralized, searchable, and interactive technical documentation hub.
+Project documentation previously existed across fragmented files (`README.md`, architecture specifications, and code docstrings). External operators, contributors, and systems engineers required a centralized, searchable, and interactive technical documentation hub.
 
 Key engineering constraints:
 1. **Public Isolation:** Public documentation must never expose internal infrastructure hostnames, credentials, or private repository paths.

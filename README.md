@@ -26,7 +26,7 @@ AndroGrid connects three foundational pillars to transform idle consumer mobile 
 2. **Mobile Worker Client (`androgrid-android`):** Native Android worker service running sandboxed WASI workloads via Chicory and Wasmtime with zero-keepalive cellular lifecycle.
 3. **System Architecture Specification (`AG-SPEC-2026-V2`):** ISO/IEC/IEEE 29148 requirements traceability matrix defining all state machines, protocol contracts, and security boundaries.
 
-For comprehensive architectural walkthroughs, visit the [Ecosystem Overview](docs/src/showcase/ecosystem.md).
+For comprehensive architectural walkthroughs, visit the [Ecosystem Overview](docs/src/showcase/ecosystem.md), inspect the [ISO 29148 Traceability Matrix](docs/traceability_matrix.md), or review the [Control Plane Architecture Decision Records](docs/adr/ADR-001-mutual-tls-1.3-ecdsa-p256.md).
 
 ---
 

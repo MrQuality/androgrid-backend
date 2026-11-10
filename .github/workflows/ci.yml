@@ -44,6 +44,10 @@ jobs:
           python3 -m unittest discover -s tests -p "test_smoke_runner.py"
           python3 tools/smoke/test_hardware_cluster.py --dry-run
 
+      - name: Verify ISO 29148 Traceability & Architecture Decision Records
+        run: |
+          python3 tools/docs/verify_traceability.py
+
       - name: Audit Typographic Standards (Zero Em/En Dashes)
         run: |
           echo "Scanning for forbidden em dashes and en dashes..."

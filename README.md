@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/androgrid-logo.svg" alt="AndroGrid Logo" width="160" height="160" />
+</p>
+
 # AndroGrid Control Plane
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)

@@ -249,6 +249,20 @@ fn task_state_to_string(state: i32) -> &'static str {
     }
 }
 
+/// Prints the stylized AndroGrid terminal banner with Emerald-to-Cyan ANSI colors.
+pub fn print_banner() {
+    let emerald = "\x1b[38;2;79;220;104m";
+    let teal = "\x1b[38;2;37;214;159m";
+    let cyan = "\x1b[38;2;9;210;238m";
+    let reset = "\x1b[0m";
+
+    println!("{emerald}   .---.     {teal}___              {cyan}____       _     __");
+    println!("{emerald}  /     \\   {teal}/ _ \\ ___  ___/ /{cyan} __/ _____ (_)___/ /");
+    println!("{emerald} | (o) (o) | {teal}/ // // _ \\/ _  /{cyan} (_ // _ `/ / _  / ");
+    println!("{emerald} ==[===]== {teal}/____/_//_/\\_,_/{cyan}\\___/ \\_,_/_/\\_,_/  ");
+    println!("{emerald}A N D R O {teal}G R I D {reset}| Distributed Mobile Edge Compute\n");
+}
+
 async fn create_channel(
     endpoint: &str,
     ca_cert: Option<&Path>,
@@ -642,9 +656,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let qr_code = render_ansi_qr(&res.pairing_payload_json)
                     .map_err(|e| format!("Failed to render ANSI QR code: {e}"))?;
 
-                println!("================================================================================");
-                println!("                      AndroGrid Device Pairing Engine                           ");
-                println!("================================================================================");
+                print_banner();
                 println!("Scan this QR code from the AndroGrid Android worker application:\n");
                 println!("{qr_code}\n");
                 println!("--------------------------------------------------------------------------------");
@@ -916,5 +928,10 @@ mod tests {
             }
             _ => panic!("Expected Pair command"),
         }
+    }
+
+    #[test]
+    fn test_print_banner_does_not_panic() {
+        print_banner();
     }
 }

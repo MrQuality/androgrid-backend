@@ -263,3 +263,101 @@ Expected JSON Output:
   "output_png": null
 }
 ```
+
+---
+
+### `androgrid-cli benchmark`
+
+Executes the canonical distributed image-processing hero workload across connected Android worker nodes or local simulated runner. Partitions high-resolution input images into discrete geometric tiles, dispatches them concurrently over gRPC or local workers, aggregates processing latencies, measures parallel speedup ratios vs a single-core CPU baseline, and reassembles the composite result image.
+
+Traceability: `[INV-005]`, `[INV-006]`, `[NFR-PERF-001]`, `[REQ-OP-004]`.
+
+#### Parameter Specification
+
+| Option | Type | Required | Default | Detailed Description & Constraints |
+| :--- | :--- | :--- | :--- | :--- |
+| `--input <PATH>` | File Path | **Yes** | N/A | Path to source image file (JPEG or PNG format). |
+| `--output <PATH>` | File Path | **Yes** | N/A | Destination path to write the reassembled composite output image. |
+| `--workload <NAME>` | String | No | `image-processor` | Workload identifier name. |
+| `--tiles <COUNT>` | Integer | No | `16` | Number of geometric tiles to partition image into (e.g. 1, 4, 9, 16). Slices conform to the 16 MB frame limit (`[NFR-PERF-001]`). |
+| `--filter <FILTER>` | String | No | `sobel` | Image filter operation: `sobel`, `blur`, `downscale`, `equalize`, `grayscale`, or `invert`. |
+| `--concurrency <N>` | Integer | No | `4` | Maximum concurrent worker tasks to dispatch in parallel. |
+| `--timeout <SECS>` | Integer | No | `60` | Per-tile task timeout limit in seconds. |
+| `--requires-unmetered` | Boolean Flag | No | `false` | When enabled, schedules only on unmetered Wi-Fi worker nodes (`[ANTI-003]`). |
+| `--wasm <PATH>` | File Path | No | None | Optional path to custom compiled `.wasm` bytecode for execution. |
+| `--dry-run` | Boolean Flag | No | `false` | When enabled, runs multi-worker simulation locally without connecting to a remote orchestrator. |
+
+#### Human-Readable Invocation (`--format text`)
+```bash
+androgrid-cli benchmark \
+  --input ./tests/fixtures/images/benchmark_sample.png \
+  --output ./result_sobel.png \
+  --tiles 16 \
+  --filter sobel \
+  --concurrency 4 \
+  --dry-run \
+  --format text
+```
+
+Expected Output:
+```text
+========================================================
+          AndroGrid Parallel Compute Benchmark          
+========================================================
+Workload:                 image-processor
+Filter Operation:         sobel
+Input Dimensions:         1024x1024 pixels
+Output Dimensions:        1024x1024 pixels
+Tiles:                    16/16 completed
+Active Cluster Workers:   4
+--------------------------------------------------------
+Single-Core Baseline:     180 ms
+Distributed Wall-Clock:   52 ms
+Parallel Speedup Ratio:   3.46x
+Payload Transferred:      1.82 MB (1910240 bytes)
+--------------------------------------------------------
+Worker Latency Distribution:
+  - Node worker-01: tile #0 (attempt 1) finished in 12 ms
+  - Node worker-02: tile #1 (attempt 1) finished in 14 ms
+  - Node worker-03: tile #2 (attempt 1) finished in 11 ms
+  - Node worker-04: tile #3 (attempt 1) finished in 13 ms
+========================================================
+```
+
+#### JSON Automation Invocation (`--format json`)
+```bash
+androgrid-cli benchmark \
+  --input ./tests/fixtures/images/benchmark_sample.png \
+  --output ./result_blur.png \
+  --tiles 4 \
+  --filter blur \
+  --dry-run \
+  --format json
+```
+
+Expected JSON Output:
+```json
+{
+  "workload": "image-processor",
+  "filter": "blur",
+  "input_width": 1024,
+  "input_height": 1024,
+  "output_width": 1024,
+  "output_height": 1024,
+  "tiles_total": 4,
+  "tiles_successful": 4,
+  "active_worker_count": 4,
+  "wall_clock_duration_ms": 48,
+  "single_thread_baseline_ms": 144,
+  "parallel_speedup_ratio": 3.0,
+  "total_payload_bytes_transferred": 819200,
+  "node_latencies": [
+    {
+      "node_id": "worker-01",
+      "tile_index": 0,
+      "attempt": 1,
+      "duration_ms": 22
+    }
+  ]
+}
+```

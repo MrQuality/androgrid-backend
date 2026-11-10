@@ -250,7 +250,7 @@ fn test_operator_cli_manual_synchronization_with_clap_definition() {
         .expect("Failed to read docs/src/operator/cli_manual.md");
 
     // Required subcommands
-    let subcommands = ["pack", "submit", "status", "nodes", "cancel"];
+    let subcommands = ["pack", "submit", "status", "nodes", "cancel", "benchmark"];
     for subcmd in subcommands {
         assert!(
             manual.contains(&format!("### `androgrid-cli {}`", subcmd))
@@ -278,6 +278,9 @@ fn test_operator_cli_manual_synchronization_with_clap_definition() {
         "--client-cert",
         "--client-key",
         "--format",
+        "--tiles",
+        "--filter",
+        "--dry-run",
     ];
 
     for flag in required_flags {

@@ -4,7 +4,7 @@
 Accepted
 
 ## Architectural Scope & Requirements
-- **Goal Reference:** G-16
+- **Feature Reference:** Issue #12
 - **GitHub Issue:** https://github.com/MrQuality/androgrid-backend/issues/12
 - **Traceability:** `[REQ-OP-001]`, `[REQ-OP-004]`, `[NFR-SEC-001]`, `[NFR-PERF-001]`
 - **Standard:** ISO/IEC/IEEE 29148

@@ -526,7 +526,7 @@ fn test_github_pages_workflow_configuration_integrity() {
 /// Validates that demo animated showcase asset exists, is non-empty,
 /// and adheres to the strict 5 MB file size limit to prevent git bloat.
 ///
-/// Traces to: [REQ-PUB-001], G-21
+/// Traces to: [REQ-PUB-001]
 #[test]
 fn test_showcase_demo_asset_exists_and_size_bounds() {
     let docs_root = get_docs_root();
@@ -552,7 +552,7 @@ fn test_showcase_demo_asset_exists_and_size_bounds() {
 /// Validates that the Mobile Cluster Economics and Battery FAQ chapter exists,
 /// provides empirical battery and thermal metrics, and cites key architectural invariants.
 ///
-/// Traces to: [NFR-POW-001], [ANTI-001], [INV-003], [REQ-OP-003], G-21
+/// Traces to: [NFR-POW-001], [ANTI-001], [INV-003], [REQ-OP-003]
 #[test]
 fn test_showcase_economics_faq_chapter_completeness() {
     let docs_root = get_docs_root();
@@ -620,7 +620,7 @@ fn test_showcase_economics_faq_chapter_completeness() {
 /// Validates that the Ecosystem Overview landing page exists, maps all core repositories
 /// and specifications, and embeds a Mermaid architecture topology diagram.
 ///
-/// Traces to: [REQ-PUB-001], G-21
+/// Traces to: [REQ-PUB-001]
 #[test]
 fn test_showcase_ecosystem_landing_page_and_navigation() {
     let docs_root = get_docs_root();
@@ -645,7 +645,7 @@ fn test_showcase_ecosystem_landing_page_and_navigation() {
         "Ecosystem page must reference androgrid-android"
     );
     assert!(
-        content.contains("AndroGrid_SDD.md") || content.contains("AG-SPEC-2026-V2"),
+        content.contains("AG-SPEC-2026-V2"),
         "Ecosystem page must reference master specification"
     );
 
@@ -664,7 +664,7 @@ fn test_showcase_ecosystem_landing_page_and_navigation() {
 
 /// Validates that internal launch templates are strictly isolated from the public repository.
 ///
-/// Traces to: [REQ-PUB-001], G-21
+/// Traces to: [REQ-PUB-001]
 #[test]
 fn test_internal_launch_blueprints_strictly_isolated_from_public_docs() {
     let docs_root = get_docs_root();
@@ -682,7 +682,7 @@ fn test_internal_launch_blueprints_strictly_isolated_from_public_docs() {
 
 /// Validates that ADR-004 is authored, accepted, and linked in SUMMARY.md.
 ///
-/// Traces to: [REQ-PUB-001], G-21
+/// Traces to: [REQ-PUB-001]
 #[test]
 fn test_showcase_adr_004_exists_and_referenced() {
     let docs_root = get_docs_root();
@@ -709,9 +709,9 @@ fn test_showcase_adr_004_exists_and_referenced() {
 }
 
 /// Validates that the repository root README embeds the demo GIF asset
-/// and includes community showcase navigation.
+/// and includes ecosystem architecture navigation.
 ///
-/// Traces to: [REQ-PUB-001], G-21
+/// Traces to: [REQ-PUB-001]
 #[test]
 fn test_readme_embeds_demo_asset_and_showcase_sections() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -726,8 +726,8 @@ fn test_readme_embeds_demo_asset_and_showcase_sections() {
         "README.md must embed docs/assets/demo.gif"
     );
     assert!(
-        readme_content.contains("Community Showcase")
+        readme_content.contains("Ecosystem Architecture")
             || readme_content.contains("Economics & Hardware Feasibility"),
-        "README.md must feature community showcase or feasibility section"
+        "README.md must feature ecosystem architecture or feasibility section"
     );
 }

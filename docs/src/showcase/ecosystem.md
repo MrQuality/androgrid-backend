@@ -33,7 +33,7 @@ flowchart TD
         Thermal["ThermalSafetyGuard & Battery Monitor"]
     end
 
-    subgraph NormativeSpec ["Normative Architecture (AndroGrid_SDD.md)"]
+    subgraph NormativeSpec ["Normative Architecture (AG-SPEC-2026-V2)"]
         Spec["AG-SPEC-2026-V2 (ISO/IEC/IEEE 29148)"]
     end
 
@@ -85,9 +85,10 @@ flowchart TD
 - **Interactive Dokka API Portal:** [mrquality.github.io/androgrid-android/dokka](https://mrquality.github.io/androgrid-android/dokka/index.html)
 - **Documentation:** [Android Worker Onboarding Guide](../android/worker_guide.md) and [Android Client Architecture](../android/architecture.md).
 
-### Pillar 3: Master Specification & Invariants (`AndroGrid_SDD.md`)
+### Pillar 3: System Architecture Specification & Invariants (`AG-SPEC-2026-V2`)
 - **Document Identifier:** `AG-SPEC-2026-V2` (ISO/IEC/IEEE 29148 compliant)
 - **Role:** Canonical architectural specification governing all wire contracts, state transitions, invariants, and security boundaries.
+- **Reference Chapters:** [System Architecture](../architecture/system_overview.md) and [Protobuf API Reference](../api/protobuf.md).
 - **Core Invariants Enforced:**
   - `[INV-001]` Zero Inbound Mobile Ports
   - `[INV-002]` Mutual TLS 1.3 Bidirectional Authentication

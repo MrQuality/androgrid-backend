@@ -58,6 +58,6 @@ The AndroGrid codebase maintains strict bidirectional traceability to ISO/IEC/IE
 - **[Android Worker Onboarding Guide](android/worker_guide.md):** Complete device enrollment, ADB commands, OpenSSL PKI generation, and OEM task killer workarounds.
 - **[Android Client Architecture](android/architecture.md):** Section 6.1 State Matrix, WorkManager spot scheduling, and Chicory WASM sandboxing.
 - **[Architecture Decision Records](adr/ADR-001-documentation-portal.md):** Architectural decisions and engineering rationales.
-- **[Ecosystem Architecture & Overview](showcase/ecosystem.md):** System component mapping across control plane, android client, and SDD specification.
+- **[Ecosystem Architecture & Overview](showcase/ecosystem.md):** System component mapping across control plane, android client, and system specification.
 - **[Mobile Cluster Economics & Battery FAQ](showcase/economics_faq.md):** Empirical battery health, thermal hysteresis, and efficiency analysis.
 - **[Interactive Android Dokka API](https://mrquality.github.io/androgrid-android/dokka/index.html):** Full Kotlin KDoc API documentation and symbol browser on GitHub Pages.

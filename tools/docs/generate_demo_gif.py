@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Interactive Demo Asset Generator
-Traces to: [REQ-PUB-001], G-21
+Traces to: [REQ-PUB-001]
 
 Programmatically renders a high-resolution animated terminal GIF demonstrating:
 1. Orchestrator bootstrap via Podman Compose

@@ -18,13 +18,13 @@ The high-concurrency Rust control plane and task orchestrator for **AndroGrid**:
 
 ---
 
-## Community Showcase & Ecosystem Overview
+## Ecosystem Architecture & Overview
 
 AndroGrid connects three foundational pillars to transform idle consumer mobile hardware into a resilient, private edge-compute cluster:
 
 1. **Host Control Plane (`androgrid-backend`):** High-concurrency task orchestrator coordinating monotonic fencing, dual assignment, and content-addressed bytecode delivery.
 2. **Mobile Worker Client (`androgrid-android`):** Native Android worker service running sandboxed WASI workloads via Chicory and Wasmtime with zero-keepalive cellular lifecycle.
-3. **Master Specification (`AndroGrid_SDD.md`):** ISO/IEC/IEEE 29148 requirements traceability matrix defining all state machines, protocol contracts, and security boundaries.
+3. **System Architecture Specification (`AG-SPEC-2026-V2`):** ISO/IEC/IEEE 29148 requirements traceability matrix defining all state machines, protocol contracts, and security boundaries.
 
 For comprehensive architectural walkthroughs, visit the [Ecosystem Overview](docs/src/showcase/ecosystem.md).
 

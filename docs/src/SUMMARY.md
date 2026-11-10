@@ -19,7 +19,6 @@
 
 - [Ecosystem Architecture & Navigation](showcase/ecosystem.md)
 - [Mobile Cluster Economics & Battery FAQ](showcase/economics_faq.md)
-- [Community Launch Blueprints & Pitch Copy](showcase/community_launch.md)
 
 # Mobile Worker Client
 

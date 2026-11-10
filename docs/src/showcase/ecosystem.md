@@ -109,4 +109,3 @@ flowchart TD
 | **Container Images** | Pre-built rootless OCI container | `ghcr.io/mrquality/androgrid-orchestrator:latest` |
 | **Starter Workload** | Rust wasm32-wasip1 starter project | [workloads/wasi-starter/README.md](https://github.com/MrQuality/androgrid-backend/tree/main/workloads/wasi-starter) |
 | **Hardware Feasibility FAQ** | Battery longevity and thermal metrics | [Mobile Economics & Battery FAQ](economics_faq.md) |
-| **Community Launch Blueprints**| Launch copy for HN, Reddit, Lobsters | [Community Launch Blueprints](community_launch.md) |

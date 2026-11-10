@@ -60,5 +60,4 @@ The AndroGrid codebase maintains strict bidirectional traceability to ISO/IEC/IE
 - **[Architecture Decision Records](adr/ADR-001-documentation-portal.md):** Architectural decisions and engineering rationales.
 - **[Ecosystem Architecture & Overview](showcase/ecosystem.md):** System component mapping across control plane, android client, and SDD specification.
 - **[Mobile Cluster Economics & Battery FAQ](showcase/economics_faq.md):** Empirical battery health, thermal hysteresis, and efficiency analysis.
-- **[Community Launch Blueprints](showcase/community_launch.md):** Launch submission copy for Hacker News, Reddit, and Lobste.rs.
 - **[Interactive Android Dokka API](https://mrquality.github.io/androgrid-android/dokka/index.html):** Full Kotlin KDoc API documentation and symbol browser on GitHub Pages.

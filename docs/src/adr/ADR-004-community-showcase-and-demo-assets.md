@@ -35,9 +35,8 @@ We implement a four-part Community Showcase subsystem within the public document
 3. **Ecosystem Architecture & Navigation Portal (`docs/src/showcase/ecosystem.md`):**
    - Unifies the three core pillars: Control Plane (`androgrid-backend`), Mobile Client (`androgrid-android`), and Master Specification (`AndroGrid_SDD.md`).
    - Embeds a Mermaid flowchart detailing component interactions and cross-links to the interactive Dokka API reference.
-4. **Multi-Channel Community Launch Blueprints (`docs/src/showcase/community_launch.md`):**
-   - Authors tailored launch copy for Hacker News (`Show HN`), Reddit (`r/rust` and `r/selfhosted`), and `Lobste.rs`.
-   - Adheres strictly to each community's technical disclosure norms.
+4. **Separation of Community Blueprints & Private Repository Boundary:**
+   - Publication templates and forum drafts are maintained strictly within private operator repositories (`androgrid-private`), keeping public documentation focused exclusively on technical architecture and hardware feasibility.
 
 ---
 
@@ -47,6 +46,6 @@ We implement a four-part Community Showcase subsystem within the public document
   - Proactively transforms skeptical developers into informed contributors through empirical hardware data.
   - Keeps repository clone size minimal (< 200 KB for all media assets).
   - Maintains strict traceability to ISO 29148 requirements and AG-SPEC-2026-V2 invariants.
+  - Preserves clean public repository boundaries by isolating promotional blueprints to private storage.
 - **Trade-offs:**
   - Dynamic animated GIF generation must be rerun if CLI or dashboard interfaces evolve.
-  - Community launch blueprints must be periodically reviewed against external forum guideline changes.

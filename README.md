@@ -40,7 +40,7 @@ Deploying cluster compute onto smartphones often raises valid concerns regarding
 - **Zero Hardware Cost:** Transforms millions of unused drawer smartphones into private edge compute nodes with built-in battery backup (UPS), Wi-Fi 6, and hardware cryptographic accelerators.
 - **Zero Inbound Ports (`[INV-001]`):** Worker devices never expose listening ports. All connections originate outbound over mutual TLS 1.3 (`[INV-002]`).
 
-Read the complete empirical analysis in the [Mobile Economics & Battery FAQ](docs/src/showcase/economics_faq.md). Community launch templates are available in [Community Launch Blueprints](docs/src/showcase/community_launch.md).
+Read the complete empirical analysis in the [Mobile Economics & Battery FAQ](docs/src/showcase/economics_faq.md).
 
 ---
 

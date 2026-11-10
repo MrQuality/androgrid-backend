@@ -13,9 +13,10 @@ use std::time::SystemTime;
 
 use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
-    build_client_mtls_config, export_png, render_ansi_qr, ArtifactPackager, CancelTaskRequest,
-    ExecutionEngine, GeneratePairingTokenRequest, GetTaskStatusRequest, ListWorkerNodesRequest,
-    SubmitTaskRequest, TaskSpec, TaskState, UploadArtifactRequest, WasiValidator,
+    build_client_mtls_config, export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig,
+    BenchmarkDispatcher, BenchmarkFilter, CancelTaskRequest, ExecutionEngine,
+    GeneratePairingTokenRequest, GetTaskStatusRequest, ListWorkerNodesRequest, SubmitTaskRequest,
+    TaskSpec, TaskState, UploadArtifactRequest, WasiValidator,
 };
 
 #[derive(Parser, Debug)]
@@ -148,6 +149,50 @@ enum Commands {
         /// Optional output file path to save QR code as PNG image
         #[arg(long)]
         output_png: Option<PathBuf>,
+    },
+
+    /// Execute distributed parallel compute benchmark across cluster worker nodes
+    /// Traces to: [INV-005], [INV-006], [NFR-PERF-001], [REQ-OP-004]
+    Benchmark {
+        /// Workload identifier (default: image-processor)
+        #[arg(long, default_value = "image-processor")]
+        workload: String,
+
+        /// Path to input image file (JPEG or PNG)
+        #[arg(long)]
+        input: PathBuf,
+
+        /// Number of geometric tiles to partition image into (default: 16)
+        #[arg(long, default_value_t = 16)]
+        tiles: u32,
+
+        /// Path to write reconstructed composite output image
+        #[arg(long)]
+        output: PathBuf,
+
+        /// Image filter operation (sobel, blur, downscale, equalize, grayscale, invert)
+        #[arg(long, default_value = "sobel")]
+        filter: String,
+
+        /// Maximum concurrent tasks to dispatch (default: 4)
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+
+        /// Task execution timeout in seconds per tile (default: 60)
+        #[arg(long, default_value_t = 60)]
+        timeout: u32,
+
+        /// Enforce execution on unmetered Wi-Fi only
+        #[arg(long)]
+        requires_unmetered: bool,
+
+        /// Path to custom WebAssembly module bytecode (.wasm)
+        #[arg(long)]
+        wasm: Option<PathBuf>,
+
+        /// Run simulated local benchmark without connecting to remote cluster
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -337,6 +382,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Commands::Benchmark {
+        workload: _,
+        input,
+        tiles,
+        output,
+        filter,
+        concurrency,
+        timeout,
+        requires_unmetered,
+        wasm,
+        dry_run,
+    } = cli.command
+    {
+        let parsed_filter =
+            BenchmarkFilter::from_str_name(&filter).unwrap_or(BenchmarkFilter::Sobel);
+        let config = BenchmarkConfig {
+            input_path: input,
+            output_path: output,
+            tiles,
+            filter: parsed_filter,
+            wasm_path: wasm.clone(),
+            timeout_seconds: timeout,
+            concurrency,
+            requires_unmetered,
+            dry_run,
+        };
+
+        let dispatcher = BenchmarkDispatcher::new(config);
+        let (_composite, metrics) = if dry_run {
+            dispatcher.run_simulated(concurrency).await?
+        } else {
+            let channel = create_channel(
+                &cli.endpoint,
+                cli.ca_cert.as_deref(),
+                cli.client_cert.as_deref(),
+                cli.client_key.as_deref(),
+            )
+            .await?;
+            let wasm_bytes = if let Some(p) = wasm {
+                Some(tokio::fs::read(&p).await?)
+            } else {
+                None
+            };
+            dispatcher.run_cluster(channel, wasm_bytes).await?
+        };
+
+        if cli.format == "json" {
+            println!("{}", serde_json::to_string_pretty(&metrics)?);
+        } else {
+            println!("{}", metrics.format_summary());
+        }
+        return Ok(());
+    }
+
     let channel = create_channel(
         &cli.endpoint,
         cli.ca_cert.as_deref(),
@@ -349,6 +448,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Pack { .. } => unreachable!(),
+        Commands::Benchmark { .. } => unreachable!(),
 
         Commands::Submit {
             task_id,
@@ -933,5 +1033,97 @@ mod tests {
     #[test]
     fn test_print_banner_does_not_panic() {
         print_banner();
+    }
+
+    #[test]
+    fn test_cli_parse_benchmark_default() {
+        let args = vec![
+            "androgrid-cli",
+            "benchmark",
+            "--input",
+            "sample.png",
+            "--output",
+            "result.png",
+        ];
+        let cli = Cli::try_parse_from(args).expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Benchmark {
+                workload,
+                input,
+                tiles,
+                output,
+                filter,
+                concurrency,
+                timeout,
+                requires_unmetered,
+                wasm,
+                dry_run,
+            } => {
+                assert_eq!(workload, "image-processor");
+                assert_eq!(input, PathBuf::from("sample.png"));
+                assert_eq!(tiles, 16);
+                assert_eq!(output, PathBuf::from("result.png"));
+                assert_eq!(filter, "sobel");
+                assert_eq!(concurrency, 4);
+                assert_eq!(timeout, 60);
+                assert!(!requires_unmetered);
+                assert_eq!(wasm, None);
+                assert!(!dry_run);
+            }
+            _ => panic!("Expected Benchmark command"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_benchmark_with_options() {
+        let args = vec![
+            "androgrid-cli",
+            "benchmark",
+            "--workload",
+            "image-processor",
+            "--input",
+            "/tmp/photo.jpg",
+            "--tiles",
+            "4",
+            "--output",
+            "/tmp/blur.jpg",
+            "--filter",
+            "blur",
+            "--concurrency",
+            "8",
+            "--timeout",
+            "120",
+            "--requires-unmetered",
+            "--wasm",
+            "target/wasm.wasm",
+            "--dry-run",
+        ];
+        let cli = Cli::try_parse_from(args).expect("CLI parse should succeed");
+        match cli.command {
+            Commands::Benchmark {
+                workload,
+                input,
+                tiles,
+                output,
+                filter,
+                concurrency,
+                timeout,
+                requires_unmetered,
+                wasm,
+                dry_run,
+            } => {
+                assert_eq!(workload, "image-processor");
+                assert_eq!(input, PathBuf::from("/tmp/photo.jpg"));
+                assert_eq!(tiles, 4);
+                assert_eq!(output, PathBuf::from("/tmp/blur.jpg"));
+                assert_eq!(filter, "blur");
+                assert_eq!(concurrency, 8);
+                assert_eq!(timeout, 120);
+                assert!(requires_unmetered);
+                assert_eq!(wasm, Some(PathBuf::from("target/wasm.wasm")));
+                assert!(dry_run);
+            }
+            _ => panic!("Expected Benchmark command"),
+        }
     }
 }

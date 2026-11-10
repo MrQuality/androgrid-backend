@@ -36,6 +36,9 @@ pub use pairing::{
     DEFAULT_PAIRING_TOKEN_TTL_SECONDS,
 };
 
+pub mod benchmark;
+pub use benchmark::*;
+
 use thiserror::Error;
 
 /// Maximum allowable gRPC message frame payload bound in bytes (16 MB).

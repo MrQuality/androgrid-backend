@@ -150,12 +150,22 @@ jobs:
         with:
           path: download
 
-      - name: Consolidate Artifacts & Generate SHA256SUMS.txt
+      - name: Install Rust Toolchain for WASM
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - name: Build Sample WASI Workload
         run: |
           mkdir -p release_dist
+          cargo build --release --target wasm32-wasip1 --manifest-path workloads/image-processor/Cargo.toml
+          cp workloads/image-processor/target/wasm32-wasip1/release/image-processor.wasm release_dist/
+
+      - name: Consolidate Artifacts & Generate SHA256SUMS.txt
+        run: |
           find download -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec cp {} release_dist/ \;
           cd release_dist
-          sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+          sha256sum *.tar.gz *.zip *.wasm > SHA256SUMS.txt
           echo "Generated SHA256SUMS.txt:"
           cat SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt

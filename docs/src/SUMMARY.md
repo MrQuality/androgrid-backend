@@ -31,3 +31,7 @@
 
 - [Android Worker Onboarding Guide](android/worker_guide.md)
 - [Android Client Architecture](android/architecture.md)
+
+# Alpha Testing & Hardware Verification
+
+- [Hardware Alpha Testing Guide - v0.0.1-alpha.1](testing/hardware_alpha_guide.md)

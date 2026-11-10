@@ -1,6 +1,6 @@
 [package]
 name = "image-processor"
-version = "0.1.0"
+version = "0.0.1-alpha.1"
 edition = "2021"
 license = "MIT"
 description = "Canonical WASI Image Processing Workload for AndroGrid distributed edge compute"

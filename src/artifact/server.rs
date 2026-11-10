@@ -61,6 +61,23 @@ impl ArtifactServer {
         Self::router(store).merge(crate::pairing::enrollment_http_router(enrollment_ctx))
     }
 
+    /// Builds the comprehensive Axum router with artifact distribution, bootstrap pairing enrollment,
+    /// and embedded real-time web dashboard & Server-Sent Events (SSE).
+    ///
+    /// Traces to: [INV-002], [INV-004], [INV-005], [NFR-SEC-001], [NFR-REL-001], [REQ-OP-001]
+    pub fn router_full(
+        store: Arc<ArtifactStore>,
+        scheduler: Arc<crate::scheduler::ClusterScheduler>,
+        enrollment_ctx: Option<crate::pairing::EnrollmentContext>,
+    ) -> Router {
+        let mut router =
+            Self::router(store).merge(crate::observability::dashboard_router(scheduler));
+        if let Some(ctx) = enrollment_ctx {
+            router = router.merge(crate::pairing::enrollment_http_router(ctx));
+        }
+        router
+    }
+
     /// Handles GET and HEAD requests for content-addressed WebAssembly artifacts.
     ///
     /// Traces to: [NFR-PERF-001], [REQ-OP-003]
@@ -195,6 +212,32 @@ impl ArtifactServer {
 
         tokio::spawn(async move {
             info!("Starting embedded HTTP static artifact and bootstrap enrollment server...");
+            if let Err(e) = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await
+            {
+                error!("Embedded HTTP server encountered error: {e}");
+            }
+        });
+    }
+
+    /// Spawns the comprehensive HTTP server hosting artifact distribution, bootstrap enrollment,
+    /// and the real-time cluster web dashboard & Server-Sent Events (SSE).
+    ///
+    /// Traces to: [INV-002], [INV-004], [INV-005], [NFR-SEC-001], [NFR-REL-001], [REQ-OP-001]
+    pub fn spawn_full(
+        listener: TcpListener,
+        store: Arc<ArtifactStore>,
+        scheduler: Arc<crate::scheduler::ClusterScheduler>,
+        enrollment_ctx: Option<crate::pairing::EnrollmentContext>,
+        shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let app = Self::router_full(store, scheduler, enrollment_ctx);
+
+        tokio::spawn(async move {
+            info!("Starting embedded HTTP static artifact, pairing, and cluster web dashboard server...");
             if let Err(e) = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;

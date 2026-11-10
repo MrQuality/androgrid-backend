@@ -31,9 +31,16 @@ pub const DEFAULT_NODE_LEASE_TIMEOUT_SECONDS: u32 = 10;
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u32 = 2;
 
 /// Thread-safe in-memory cluster scheduler.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ClusterScheduler {
     inner: Arc<RwLock<SchedulerInner>>,
+    event_sender: tokio::sync::broadcast::Sender<crate::observability::ClusterEvent>,
+}
+
+impl Default for ClusterScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -54,6 +61,7 @@ impl ClusterScheduler {
     ///
     /// Traces to: [INV-006], [NFR-POW-001]
     pub fn with_options(allow_insecure_root_tasks: bool, thermal_policy: ThermalPolicy) -> Self {
+        let (event_sender, _) = tokio::sync::broadcast::channel(1024);
         Self {
             inner: Arc::new(RwLock::new(SchedulerInner {
                 tasks: HashMap::new(),
@@ -61,7 +69,24 @@ impl ClusterScheduler {
                 allow_insecure_root_tasks,
                 thermal_policy,
             })),
+            event_sender,
         }
+    }
+
+    /// Subscribes to real-time cluster broadcast events.
+    ///
+    /// Traces to: [INV-004], [INV-005], [NFR-REL-001]
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::observability::ClusterEvent> {
+        self.event_sender.subscribe()
+    }
+
+    /// Emits a cluster state transition event to active subscribers.
+    ///
+    /// Traces to: [INV-004], [INV-005], [NFR-REL-001]
+    pub fn emit_event(&self, event: crate::observability::ClusterEvent) {
+        let _ = self.event_sender.send(event);
     }
 
     /// Returns whether scheduling of insecure root shell tasks is allowed.
@@ -133,7 +158,30 @@ impl ClusterScheduler {
             active_task_ids: Vec::new(),
         };
 
+        let transport_str = if worker.capabilities.current_transport
+            == NetworkTransportType::NetworkTransportWifiLan as i32
+        {
+            "Wi-Fi LAN".to_string()
+        } else {
+            "Cellular WAN".to_string()
+        };
+
+        let reg_event = crate::observability::ClusterEvent::NodeRegistered {
+            node_id: worker.node_id.clone(),
+            transport: transport_str,
+            is_rooted: worker.capabilities.is_rooted,
+            battery_pct: worker.battery_level_pct,
+            is_charging: worker.is_charging,
+            thermal_status: worker.thermal_status,
+            cpu_cores: worker.capabilities.cpu_cores,
+            ram_mb: worker.capabilities.total_ram_bytes / (1024 * 1024),
+            os_version: worker.capabilities.os_version.clone(),
+        };
+
         inner.workers.insert(node_id, worker);
+        drop(inner);
+
+        self.emit_event(reg_event);
 
         Ok(RegisterNodeResponse {
             session_token,
@@ -146,7 +194,22 @@ impl ClusterScheduler {
     pub fn submit_task(&self, spec: TaskSpec) -> Result<(), SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         let task_id = spec.task_id.clone();
+        let engine_str = match spec.engine {
+            1 => "WasmWasi",
+            2 => "RootShell",
+            3 => "ToyboxUser",
+            _ => "Unknown",
+        }
+        .to_string();
+        let submit_event = crate::observability::ClusterEvent::TaskSubmitted {
+            task_id: task_id.clone(),
+            engine: engine_str,
+            timeout_seconds: spec.timeout_seconds,
+            requires_unmetered: spec.requires_unmetered,
+        };
         inner.tasks.insert(task_id, TaskRecord::new(spec));
+        drop(inner);
+        self.emit_event(submit_event);
         Ok(())
     }
 
@@ -261,8 +324,15 @@ impl ClusterScheduler {
                 out_spec.run_attempt = 1;
 
                 if let Some(w) = inner.workers.get_mut(node_id) {
-                    w.active_task_ids.push(task_id);
+                    w.active_task_ids.push(task_id.clone());
                 }
+
+                drop(inner);
+                self.emit_event(crate::observability::ClusterEvent::TaskLeased {
+                    task_id,
+                    node_id: node_id.to_string(),
+                    run_attempt: 1,
+                });
 
                 Ok(ClaimCellularTaskResponse {
                     task_available: true,
@@ -334,6 +404,7 @@ impl ClusterScheduler {
         };
 
         let mut acknowledged_ids = Vec::new();
+        let mut transition_events = Vec::new();
 
         // Process completed reports submitted via Wi-Fi
         for report in completed_reports {
@@ -357,6 +428,24 @@ impl ClusterScheduler {
                         committed_attempt: report.run_attempt,
                     });
                     acknowledged_ids.push(report.task_id.clone());
+
+                    if report.exit_code == 0 {
+                        transition_events.push(crate::observability::ClusterEvent::TaskCompleted {
+                            task_id: report.task_id.clone(),
+                            node_id: node_id.to_string(),
+                            run_attempt: report.run_attempt,
+                            exit_code: report.exit_code,
+                            execution_duration_ms: report.execution_time_ms,
+                        });
+                    } else {
+                        transition_events.push(crate::observability::ClusterEvent::TaskFailed {
+                            task_id: report.task_id.clone(),
+                            node_id: node_id.to_string(),
+                            run_attempt: report.run_attempt,
+                            error_code: report.error_code.clone(),
+                            error_message: "Wi-Fi worker reported task failure".to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -379,6 +468,12 @@ impl ClusterScheduler {
                     let mut spec = record.spec.clone();
                     spec.run_attempt = record.active_attempt;
                     desired_tasks.push(spec);
+
+                    transition_events.push(crate::observability::ClusterEvent::TaskLeased {
+                        task_id: record.spec.task_id.clone(),
+                        node_id: node_id.to_string(),
+                        run_attempt: record.active_attempt,
+                    });
                     break;
                 }
             }
@@ -396,6 +491,7 @@ impl ClusterScheduler {
                             continue;
                         }
 
+                        let original_node_id = record.assigned_node_id.clone();
                         // Preemption state transition: LEASED -> PREEMPTED with run_attempt increment
                         record.state = TaskState::Preempted;
                         record.active_attempt += 1; // Increment attempt (attempt = 2)
@@ -404,10 +500,22 @@ impl ClusterScheduler {
                         let mut spec = record.spec.clone();
                         spec.run_attempt = record.active_attempt;
                         desired_tasks.push(spec);
+
+                        transition_events.push(crate::observability::ClusterEvent::TaskPreempted {
+                            task_id: record.spec.task_id.clone(),
+                            original_node_id,
+                            speculative_node_id: node_id.to_string(),
+                            new_attempt: record.active_attempt,
+                        });
                         break;
                     }
                 }
             }
+        }
+
+        drop(inner);
+        for ev in transition_events {
+            self.emit_event(ev);
         }
 
         Ok(SyncNodeStateResponse {
@@ -465,6 +573,26 @@ impl ClusterScheduler {
             committed_attempt: request.run_attempt,
         });
 
+        drop(inner);
+
+        if request.exit_code == 0 {
+            self.emit_event(crate::observability::ClusterEvent::TaskCompleted {
+                task_id: request.task_id.clone(),
+                node_id: request.node_id.clone(),
+                run_attempt: request.run_attempt,
+                exit_code: request.exit_code,
+                execution_duration_ms: request.execution_duration_ms,
+            });
+        } else {
+            self.emit_event(crate::observability::ClusterEvent::TaskFailed {
+                task_id: request.task_id.clone(),
+                node_id: request.node_id.clone(),
+                run_attempt: request.run_attempt,
+                error_code: request.error_code.clone(),
+                error_message: request.error_message.clone(),
+            });
+        }
+
         Ok(SubmitCellularResultResponse {
             accepted: true,
             status_message: "Committed".to_string(),
@@ -512,6 +640,13 @@ impl ClusterScheduler {
             }
         }
 
+        drop(inner);
+        for id in &expired {
+            self.emit_event(crate::observability::ClusterEvent::TaskTimedOut {
+                task_id: id.clone(),
+            });
+        }
+
         expired
     }
 
@@ -530,6 +665,213 @@ impl ClusterScheduler {
                 last_heartbeat_epoch_seconds: worker.last_seen_epoch_ms / 1000,
             })
             .collect()
+    }
+
+    /// Lists all compute tasks, optionally filtered by lifecycle state.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004], [INV-005]
+    pub fn list_tasks(&self, state_filter: Option<TaskState>) -> Vec<crate::TaskInfo> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        inner
+            .tasks
+            .values()
+            .filter(|task| {
+                if let Some(filter) = state_filter {
+                    task.state == filter
+                } else {
+                    true
+                }
+            })
+            .map(|task| {
+                let (exit_code, execution_duration_ms, error_message) =
+                    if let Some(ref r) = task.result {
+                        (
+                            r.exit_code,
+                            r.execution_duration_ms,
+                            if r.error_message.is_empty() {
+                                None
+                            } else {
+                                Some(r.error_message.clone())
+                            },
+                        )
+                    } else {
+                        (0, 0, None)
+                    };
+
+                crate::TaskInfo {
+                    task_id: task.spec.task_id.clone(),
+                    state: task.state as i32,
+                    engine: task.spec.engine,
+                    run_attempt: task.active_attempt,
+                    assigned_node_id: task.assigned_node_id.clone().unwrap_or_default(),
+                    timeout_seconds: task.spec.timeout_seconds,
+                    requires_unmetered: task.spec.requires_unmetered,
+                    exit_code,
+                    execution_duration_ms,
+                    error_message: error_message.unwrap_or_default(),
+                    speculative_node_id: task.speculative_node_id.clone().unwrap_or_default(),
+                }
+            })
+            .collect()
+    }
+
+    /// Generates a comprehensive point-in-time snapshot of the cluster state.
+    ///
+    /// Traces to: [REQ-OP-001], [REQ-OP-004], [INV-004], [INV-005]
+    pub fn get_snapshot(&self) -> crate::observability::ClusterSnapshot {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let mut wifi_nodes = 0;
+        let mut cellular_nodes = 0;
+
+        let nodes: Vec<crate::observability::WorkerNodeSnapshot> = inner
+            .workers
+            .values()
+            .map(|w| {
+                let is_wifi = w.capabilities.current_transport
+                    == NetworkTransportType::NetworkTransportWifiLan as i32;
+                if is_wifi {
+                    wifi_nodes += 1;
+                } else {
+                    cellular_nodes += 1;
+                }
+
+                let thermal_badge = match w.thermal_status {
+                    0 => "NOMINAL",
+                    1 => "LIGHT",
+                    2 => "MODERATE",
+                    3 => "SEVERE",
+                    _ => "CRITICAL",
+                }
+                .to_string();
+
+                crate::observability::WorkerNodeSnapshot {
+                    node_id: w.node_id.clone(),
+                    is_rooted: w.capabilities.is_rooted,
+                    transport: if is_wifi {
+                        "Wi-Fi LAN".to_string()
+                    } else {
+                        "Cellular WAN".to_string()
+                    },
+                    battery_level_pct: w.battery_level_pct,
+                    is_charging: w.is_charging,
+                    thermal_status: w.thermal_status,
+                    thermal_badge,
+                    cpu_cores: w.capabilities.cpu_cores,
+                    ram_mb: w.capabilities.total_ram_bytes / (1024 * 1024),
+                    os_version: w.capabilities.os_version.clone(),
+                    abi: w.capabilities.abi.clone(),
+                    client_version: w.client_version.clone(),
+                    last_seen_epoch_ms: w.last_seen_epoch_ms,
+                }
+            })
+            .collect();
+
+        let mut pending_tasks = 0;
+        let mut leased_tasks = 0;
+        let mut completed_tasks = 0;
+        let mut failed_tasks = 0;
+        let mut preempted_tasks = 0;
+        let mut timed_out_tasks = 0;
+
+        let tasks: Vec<crate::observability::TaskSnapshot> = inner
+            .tasks
+            .values()
+            .map(|t| {
+                let state_str = match t.state {
+                    TaskState::Pending => {
+                        pending_tasks += 1;
+                        "Pending"
+                    }
+                    TaskState::Leased => {
+                        leased_tasks += 1;
+                        "Leased"
+                    }
+                    TaskState::Running => {
+                        leased_tasks += 1;
+                        "Running"
+                    }
+                    TaskState::Completed => {
+                        completed_tasks += 1;
+                        "Completed"
+                    }
+                    TaskState::Failed => {
+                        failed_tasks += 1;
+                        "Failed"
+                    }
+                    TaskState::Preempted => {
+                        preempted_tasks += 1;
+                        "Preempted"
+                    }
+                    TaskState::TimedOut => {
+                        timed_out_tasks += 1;
+                        "TimedOut"
+                    }
+                    _ => "Unknown",
+                }
+                .to_string();
+
+                let engine_str = match t.spec.engine {
+                    1 => "WasmWasi",
+                    2 => "RootShell",
+                    3 => "ToyboxUser",
+                    _ => "Unknown",
+                }
+                .to_string();
+
+                let (exit_code, dur, err_msg) = if let Some(ref res) = t.result {
+                    (
+                        Some(res.exit_code),
+                        Some(res.execution_duration_ms),
+                        if res.error_message.is_empty() {
+                            None
+                        } else {
+                            Some(res.error_message.clone())
+                        },
+                    )
+                } else {
+                    (None, None, None)
+                };
+
+                crate::observability::TaskSnapshot {
+                    task_id: t.spec.task_id.clone(),
+                    state: state_str,
+                    engine: engine_str,
+                    run_attempt: t.active_attempt,
+                    assigned_node_id: t.assigned_node_id.clone(),
+                    speculative_node_id: t.speculative_node_id.clone(),
+                    timeout_seconds: t.spec.timeout_seconds,
+                    requires_unmetered: t.spec.requires_unmetered,
+                    exit_code,
+                    execution_duration_ms: dur,
+                    error_message: err_msg,
+                }
+            })
+            .collect();
+
+        let metrics = crate::observability::ClusterMetrics {
+            total_nodes: nodes.len(),
+            wifi_nodes,
+            cellular_nodes,
+            total_tasks: tasks.len(),
+            pending_tasks,
+            leased_tasks,
+            completed_tasks,
+            failed_tasks,
+            preempted_tasks,
+            timed_out_tasks,
+        };
+
+        crate::observability::ClusterSnapshot {
+            nodes,
+            tasks,
+            metrics,
+            timestamp_epoch_ms: now,
+        }
     }
 
     /// Cancels a task if it is not already in a terminal state.
@@ -559,6 +901,11 @@ impl ClusterScheduler {
             execution_duration_ms: 0,
             committed_by_node_id: "operator".to_string(),
             committed_attempt: task.active_attempt,
+        });
+
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskCancelled {
+            task_id: task_id.to_string(),
         });
 
         Ok(())

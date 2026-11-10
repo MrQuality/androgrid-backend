@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AndroGrid Cluster Observability</title>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #21262d;
+      --border-color: #30363d;
+      --text-primary: #c9d1d9;
+      --text-muted: #8b949e;
+      --accent-cyan: #58a6ff;
+      --accent-green: #3fb950;
+      --accent-yellow: #d29922;
+      --accent-red: #f85149;
+      --accent-purple: #bc8cff;
+      --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-family);
+      line-height: 1.5;
+      padding: 24px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border-color);
+      margin-bottom: 24px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-logo {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #238636 0%, #1f6feb 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 20px;
+      color: #ffffff;
+      box-shadow: 0 0 12px rgba(31, 111, 235, 0.4);
+    }
+
+    .brand-text h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      color: #ffffff;
+    }
+
+    .brand-text p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .connection-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--accent-green);
+      box-shadow: 0 0 8px var(--accent-green);
+    }
+
+    .status-dot.disconnected {
+      background-color: var(--accent-red);
+      box-shadow: 0 0 8px var(--accent-red);
+    }
+
+    .metrics-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+
+    .metric-card {
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .metric-title {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .metric-value {
+      font-size: 28px;
+      font-weight: 700;
+      color: #ffffff;
+      font-family: var(--font-mono);
+    }
+
+    .main-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 1024px) {
+      .main-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .panel {
+      background-color: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      height: 600px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .panel-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #ffffff;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .badge-count {
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      padding: 2px 8px;
+      font-size: 11px;
+      color: var(--accent-cyan);
+      font-family: var(--font-mono);
+    }
+
+    .node-list {
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding-right: 4px;
+    }
+
+    .node-card {
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 14px;
+      transition: border-color 0.2s ease;
+    }
+
+    .node-card:hover {
+      border-color: var(--accent-cyan);
+    }
+
+    .node-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 10px;
+    }
+
+    .node-id {
+      font-family: var(--font-mono);
+      font-size: 14px;
+      font-weight: 600;
+      color: #ffffff;
+    }
+
+    .badges {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .badge-wifi {
+      background-color: rgba(88, 166, 255, 0.15);
+      color: var(--accent-cyan);
+      border: 1px solid rgba(88, 166, 255, 0.3);
+    }
+
+    .badge-cellular {
+      background-color: rgba(210, 153, 34, 0.15);
+      color: var(--accent-yellow);
+      border: 1px solid rgba(210, 153, 34, 0.3);
+    }
+
+    .badge-rooted {
+      background-color: rgba(188, 140, 255, 0.15);
+      color: var(--accent-purple);
+      border: 1px solid rgba(188, 140, 255, 0.3);
+    }
+
+    .badge-sandbox {
+      background-color: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+      border: 1px solid rgba(63, 185, 80, 0.3);
+    }
+
+    .badge-thermal-nominal {
+      background-color: rgba(63, 185, 80, 0.15);
+      color: var(--accent-green);
+    }
+
+    .badge-thermal-moderate {
+      background-color: rgba(210, 153, 34, 0.15);
+      color: var(--accent-yellow);
+    }
+
+    .badge-thermal-severe {
+      background-color: rgba(248, 81, 73, 0.15);
+      color: var(--accent-red);
+    }
+
+    .battery-container {
+      margin-top: 10px;
+    }
+
+    .battery-header {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .battery-bar-bg {
+      background-color: var(--bg-primary);
+      border-radius: 4px;
+      height: 7px;
+      overflow: hidden;
+      border: 1px solid var(--border-color);
+    }
+
+    .battery-bar-fill {
+      height: 100%;
+      background-color: var(--accent-green);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    .battery-bar-fill.warn {
+      background-color: var(--accent-yellow);
+    }
+
+    .battery-bar-fill.danger {
+      background-color: var(--accent-red);
+    }
+
+    .node-meta {
+      display: flex;
+      gap: 16px;
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .node-meta span strong {
+      color: var(--text-primary);
+    }
+
+    .right-tabs {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+    }
+
+    .tab-btn {
+      background: none;
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 6px 14px;
+      color: var(--text-muted);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .tab-btn.active {
+      background-color: var(--bg-tertiary);
+      color: #ffffff;
+      border-color: var(--accent-cyan);
+    }
+
+    .tab-content {
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .task-card {
+      background-color: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .task-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .task-id {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: #ffffff;
+    }
+
+    .task-state {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .state-pending { background: rgba(139, 148, 158, 0.2); color: var(--text-muted); }
+    .state-leased { background: rgba(88, 166, 255, 0.2); color: var(--accent-cyan); }
+    .state-running { background: rgba(210, 153, 34, 0.2); color: var(--accent-yellow); }
+    .state-preempted { background: rgba(188, 140, 255, 0.2); color: var(--accent-purple); border: 1px solid var(--accent-purple); }
+    .state-completed { background: rgba(63, 185, 80, 0.2); color: var(--accent-green); }
+    .state-failed { background: rgba(248, 81, 73, 0.2); color: var(--accent-red); }
+
+    .task-details {
+      display: flex;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .terminal-log {
+      background-color: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 6px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .log-entry {
+      display: flex;
+      gap: 10px;
+      line-height: 1.4;
+      border-bottom: 1px solid rgba(48, 54, 61, 0.4);
+      padding-bottom: 4px;
+    }
+
+    .log-time {
+      color: var(--text-muted);
+      flex-shrink: 0;
+    }
+
+    .log-tag {
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .tag-registered { color: var(--accent-green); }
+    .tag-submitted { color: var(--accent-cyan); }
+    .tag-leased { color: var(--accent-yellow); }
+    .tag-preempted { color: var(--accent-purple); font-weight: 800; }
+    .tag-completed { color: var(--accent-green); }
+    .tag-failed { color: var(--accent-red); }
+    .tag-cancelled { color: var(--text-muted); }
+
+    .log-text {
+      color: var(--text-primary);
+      word-break: break-all;
+    }
+
+    .empty-state {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-muted);
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="brand-logo">A</div>
+      <div class="brand-text">
+        <h1>AndroGrid Cluster Observability</h1>
+        <p>Real-Time Mobile Edge Computing &amp; Speculative Spot Orchestration</p>
+      </div>
+    </div>
+    <div class="header-actions">
+      <div class="connection-status" id="connStatus">
+        <div class="status-dot" id="statusDot"></div>
+        <span id="statusText">CONNECTING...</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="metrics-bar">
+    <div class="metric-card">
+      <div class="metric-title">Worker Nodes</div>
+      <div class="metric-value" id="valTotalNodes">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Wi-Fi LAN Nodes</div>
+      <div class="metric-value" id="valWifiNodes">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Cellular WAN Nodes</div>
+      <div class="metric-value" id="valCellularNodes">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Total Tasks</div>
+      <div class="metric-value" id="valTotalTasks">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Running / Leased</div>
+      <div class="metric-value" id="valLeasedTasks">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Preemptions [INV-005]</div>
+      <div class="metric-value" id="valPreemptedTasks">0</div>
+    </div>
+  </section>
+
+  <main class="main-grid">
+    <!-- Left Column: Worker Nodes Inventory -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="panel-title">
+          <span>Worker Nodes</span>
+          <span class="badge-count" id="badgeNodeCount">0</span>
+        </div>
+      </div>
+      <div class="node-list" id="nodeList">
+        <div class="empty-state">No Android worker nodes connected</div>
+      </div>
+    </div>
+
+    <!-- Right Column: Tasks & Live Event Stream -->
+    <div class="panel">
+      <div class="panel-header">
+        <div class="right-tabs">
+          <button class="tab-btn active" id="tabTasksBtn" onclick="switchTab('tasks')">Task Execution Pipeline</button>
+          <button class="tab-btn" id="tabEventsBtn" onclick="switchTab('events')">Live Event Stream</button>
+        </div>
+        <span class="badge-count" id="badgeTaskOrEventCount">0</span>
+      </div>
+
+      <div class="tab-content" id="tasksTab">
+        <div class="empty-state">No active or completed compute tasks</div>
+      </div>
+
+      <div class="terminal-log" id="eventsTab" style="display: none;">
+        <!-- Streaming SSE log entries will be appended here -->
+      </div>
+    </div>
+  </main>
+
+  <script>
+    let activeTab = 'tasks';
+    let nodesMap = new Map();
+    let tasksMap = new Map();
+    let logEntriesCount = 0;
+
+    function switchTab(tab) {
+      activeTab = tab;
+      const tasksTab = document.getElementById('tasksTab');
+      const eventsTab = document.getElementById('eventsTab');
+      const tabTasksBtn = document.getElementById('tabTasksBtn');
+      const tabEventsBtn = document.getElementById('tabEventsBtn');
+
+      if (tab === 'tasks') {
+        tasksTab.style.display = 'flex';
+        eventsTab.style.display = 'none';
+        tabTasksBtn.classList.add('active');
+        tabEventsBtn.classList.remove('active');
+        document.getElementById('badgeTaskOrEventCount').innerText = tasksMap.size;
+      } else {
+        tasksTab.style.display = 'none';
+        eventsTab.style.display = 'flex';
+        tabTasksBtn.classList.remove('active');
+        tabEventsBtn.classList.add('active');
+        document.getElementById('badgeTaskOrEventCount').innerText = logEntriesCount;
+      }
+    }
+
+    function formatTime(epochMs) {
+      const d = epochMs ? new Date(epochMs) : new Date();
+      return d.toTimeString().split(' ')[0] + '.' + String(d.getMilliseconds()).padStart(3, '0');
+    }
+
+    function addLogEntry(tag, text, tagClass) {
+      logEntriesCount++;
+      const eventsTab = document.getElementById('eventsTab');
+      const row = document.createElement('div');
+      row.className = 'log-entry';
+
+      const timeSpan = document.createElement('span');
+      timeSpan.className = 'log-time';
+      timeSpan.innerText = formatTime();
+
+      const tagSpan = document.createElement('span');
+      tagSpan.className = 'log-tag ' + (tagClass || '');
+      tagSpan.innerText = '[' + tag + ']';
+
+      const textSpan = document.createElement('span');
+      textSpan.className = 'log-text';
+      textSpan.innerText = text;
+
+      row.appendChild(timeSpan);
+      row.appendChild(tagSpan);
+      row.appendChild(textSpan);
+
+      eventsTab.appendChild(row);
+      eventsTab.scrollTop = eventsTab.scrollHeight;
+
+      if (activeTab === 'events') {
+        document.getElementById('badgeTaskOrEventCount').innerText = logEntriesCount;
+      }
+    }
+
+    function renderMetrics(metrics) {
+      if (!metrics) return;
+      document.getElementById('valTotalNodes').innerText = metrics.total_nodes;
+      document.getElementById('valWifiNodes').innerText = metrics.wifi_nodes;
+      document.getElementById('valCellularNodes').innerText = metrics.cellular_nodes;
+      document.getElementById('valTotalTasks').innerText = metrics.total_tasks;
+      document.getElementById('valLeasedTasks').innerText = metrics.leased_tasks;
+      document.getElementById('valPreemptedTasks').innerText = metrics.preempted_tasks;
+      document.getElementById('badgeNodeCount').innerText = metrics.total_nodes;
+      if (activeTab === 'tasks') {
+        document.getElementById('badgeTaskOrEventCount').innerText = metrics.total_tasks;
+      }
+    }
+
+    function renderNodes() {
+      const container = document.getElementById('nodeList');
+      if (nodesMap.size === 0) {
+        container.innerHTML = '<div class="empty-state">No Android worker nodes connected</div>';
+        return;
+      }
+
+      container.innerHTML = '';
+      nodesMap.forEach(node => {
+        const card = document.createElement('div');
+        card.className = 'node-card';
+
+        const isWifi = node.transport && node.transport.includes('Wi-Fi');
+        const transClass = isWifi ? 'badge-wifi' : 'badge-cellular';
+        const rootBadge = node.is_rooted ? '<span class="badge badge-rooted">ROOTED</span>' : '<span class="badge badge-sandbox">WASM SANDBOX</span>';
+
+        let thermalClass = 'badge-thermal-nominal';
+        if (node.thermal_status >= 3) thermalClass = 'badge-thermal-severe';
+        else if (node.thermal_status >= 1) thermalClass = 'badge-thermal-moderate';
+
+        let batteryFillClass = '';
+        if (node.battery_level_pct <= 20) batteryFillClass = 'danger';
+        else if (node.battery_level_pct <= 50) batteryFillClass = 'warn';
+
+        const chargingIcon = node.is_charging ? '⚡ ' : '';
+
+        card.innerHTML = `
+          <div class="node-card-header">
+            <span class="node-id">${escapeHtml(node.node_id)}</span>
+            <div class="badges">
+              <span class="badge ${transClass}">${escapeHtml(node.transport)}</span>
+              ${rootBadge}
+              <span class="badge ${thermalClass}">${escapeHtml(node.thermal_badge || 'NOMINAL')}</span>
+            </div>
+          </div>
+          <div class="battery-container">
+            <div class="battery-header">
+              <span>Battery Level</span>
+              <span>${chargingIcon}${node.battery_level_pct}%</span>
+            </div>
+            <div class="battery-bar-bg">
+              <div class="battery-bar-fill ${batteryFillClass}" style="width: ${node.battery_level_pct}%"></div>
+            </div>
+          </div>
+          <div class="node-meta">
+            <span>CPU: <strong>${node.cpu_cores} Cores</strong></span>
+            <span>RAM: <strong>${node.ram_mb} MB</strong></span>
+            <span>OS: <strong>Android ${escapeHtml(node.os_version)}</strong></span>
+            <span>ABI: <strong>${escapeHtml(node.abi)}</strong></span>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function renderTasks() {
+      const container = document.getElementById('tasksTab');
+      if (tasksMap.size === 0) {
+        container.innerHTML = '<div class="empty-state">No active or completed compute tasks</div>';
+        return;
+      }
+
+      container.innerHTML = '';
+      tasksMap.forEach(task => {
+        const card = document.createElement('div');
+        card.className = 'task-card';
+
+        const stateStr = task.state || 'Pending';
+        const stateLower = stateStr.toLowerCase();
+        const stateClass = 'state-' + stateLower;
+
+        let extraMeta = '';
+        if (task.execution_duration_ms !== null && task.execution_duration_ms !== undefined) {
+          extraMeta += `<span>Duration: <strong>${task.execution_duration_ms} ms</strong></span>`;
+        }
+        if (task.exit_code !== null && task.exit_code !== undefined) {
+          extraMeta += `<span>Exit Code: <strong>${task.exit_code}</strong></span>`;
+        }
+
+        const preemptBadge = stateStr === 'Preempted' ? ' <span style="color:var(--accent-purple);">[INV-005 Speculative Spot]</span>' : '';
+
+        card.innerHTML = `
+          <div class="task-card-header">
+            <span class="task-id">${escapeHtml(task.task_id)}</span>
+            <span class="task-state ${stateClass}">${escapeHtml(stateStr)}</span>
+          </div>
+          <div class="task-details">
+            <span>Engine: <strong>${escapeHtml(task.engine || 'WasmWasi')}</strong></span>
+            <span>Attempt: <strong>#${task.run_attempt}</strong></span>
+            <span>Worker: <strong>${escapeHtml(task.assigned_node_id || 'unassigned')}</strong></span>
+            ${extraMeta}
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    async function loadSnapshot() {
+      try {
+        const res = await fetch('/api/snapshot');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+
+        nodesMap.clear();
+        (data.nodes || []).forEach(n => nodesMap.set(n.node_id, n));
+
+        tasksMap.clear();
+        (data.tasks || []).forEach(t => tasksMap.set(t.task_id, t));
+
+        renderMetrics(data.metrics);
+        renderNodes();
+        renderTasks();
+        addLogEntry('SNAPSHOT', 'Loaded initial cluster state (' + nodesMap.size + ' nodes, ' + tasksMap.size + ' tasks)', 'tag-registered');
+      } catch (err) {
+        console.error('Failed to load snapshot:', err);
+      }
+    }
+
+    function connectSSE() {
+      const statusDot = document.getElementById('statusDot');
+      const statusText = document.getElementById('statusText');
+
+      const sse = new EventSource('/api/events');
+
+      sse.onopen = () => {
+        statusDot.className = 'status-dot';
+        statusText.innerText = 'SSE CONNECTED';
+        addLogEntry('SSE', 'Established live stream connection to cluster orchestrator', 'tag-registered');
+      };
+
+      sse.onmessage = (event) => {
+        try {
+          const ev = JSON.parse(event.data);
+          handleClusterEvent(ev);
+        } catch (err) {
+          console.error('Error parsing SSE event:', err);
+        }
+      };
+
+      sse.onerror = () => {
+        statusDot.className = 'status-dot disconnected';
+        statusText.innerText = 'RECONNECTING...';
+        sse.close();
+        setTimeout(connectSSE, 2000);
+      };
+    }
+
+    function handleClusterEvent(ev) {
+      const type = ev.type;
+      const data = ev.data;
+
+      switch (type) {
+        case 'NodeRegistered':
+          nodesMap.set(data.node_id, {
+            node_id: data.node_id,
+            is_rooted: data.is_rooted,
+            transport: data.transport,
+            battery_level_pct: data.battery_pct,
+            is_charging: data.is_charging,
+            thermal_status: data.thermal_status,
+            thermal_badge: data.thermal_status === 0 ? 'NOMINAL' : (data.thermal_status >= 3 ? 'SEVERE' : 'MODERATE'),
+            cpu_cores: data.cpu_cores,
+            ram_mb: data.ram_mb,
+            os_version: data.os_version,
+            abi: 'arm64-v8a',
+            client_version: '0.1.0',
+            last_seen_epoch_ms: Date.now()
+          });
+          renderNodes();
+          addLogEntry('NODE_REGISTERED', `Worker node ${data.node_id} (${data.transport}) registered [${data.cpu_cores} cores, ${data.battery_pct}%]`, 'tag-registered');
+          break;
+
+        case 'NodeHeartbeat':
+          if (nodesMap.has(data.node_id)) {
+            const n = nodesMap.get(data.node_id);
+            n.battery_level_pct = data.battery_pct;
+            n.is_charging = data.is_charging;
+            n.thermal_status = data.thermal_status;
+            n.last_seen_epoch_ms = data.last_seen_epoch_ms;
+            renderNodes();
+          }
+          break;
+
+        case 'TaskSubmitted':
+          tasksMap.set(data.task_id, {
+            task_id: data.task_id,
+            state: 'Pending',
+            engine: data.engine,
+            run_attempt: 0,
+            assigned_node_id: null,
+            timeout_seconds: data.timeout_seconds,
+            requires_unmetered: data.requires_unmetered
+          });
+          renderTasks();
+          addLogEntry('TASK_SUBMITTED', `Task ${data.task_id} enqueued (${data.engine}, timeout ${data.timeout_seconds}s)`, 'tag-submitted');
+          break;
+
+        case 'TaskLeased':
+          if (tasksMap.has(data.task_id)) {
+            const t = tasksMap.get(data.task_id);
+            t.state = 'Leased';
+            t.assigned_node_id = data.node_id;
+            t.run_attempt = data.run_attempt;
+          }
+          renderTasks();
+          addLogEntry('TASK_LEASED', `Task ${data.task_id} leased to worker ${data.node_id} (attempt #${data.run_attempt})`, 'tag-leased');
+          break;
+
+        case 'TaskPreempted':
+          if (tasksMap.has(data.task_id)) {
+            const t = tasksMap.get(data.task_id);
+            t.state = 'Preempted';
+            t.speculative_node_id = data.speculative_node_id;
+            t.run_attempt = data.new_attempt;
+          }
+          renderTasks();
+          addLogEntry('TASK_PREEMPTED', `[INV-005 Speculative Spot] Task ${data.task_id} preempted by Wi-Fi worker ${data.speculative_node_id} (attempt incremented to #${data.new_attempt})`, 'tag-preempted');
+          break;
+
+        case 'TaskCompleted':
+          if (tasksMap.has(data.task_id)) {
+            const t = tasksMap.get(data.task_id);
+            t.state = 'Completed';
+            t.assigned_node_id = data.node_id;
+            t.run_attempt = data.run_attempt;
+            t.exit_code = data.exit_code;
+            t.execution_duration_ms = data.execution_duration_ms;
+          }
+          renderTasks();
+          addLogEntry('TASK_COMPLETED', `Task ${data.task_id} committed by ${data.node_id} (attempt #${data.run_attempt}) in ${data.execution_duration_ms} ms with exit code ${data.exit_code}`, 'tag-completed');
+          break;
+
+        case 'TaskFailed':
+          if (tasksMap.has(data.task_id)) {
+            const t = tasksMap.get(data.task_id);
+            t.state = 'Failed';
+            t.assigned_node_id = data.node_id;
+            t.run_attempt = data.run_attempt;
+            t.error_message = data.error_message;
+          }
+          renderTasks();
+          addLogEntry('TASK_FAILED', `Task ${data.task_id} failed on ${data.node_id}: ${data.error_message}`, 'tag-failed');
+          break;
+
+        case 'TaskCancelled':
+          if (tasksMap.has(data.task_id)) {
+            const t = tasksMap.get(data.task_id);
+            t.state = 'Failed';
+          }
+          renderTasks();
+          addLogEntry('TASK_CANCELLED', `Task ${data.task_id} cancelled by operator`, 'tag-cancelled');
+          break;
+      }
+    }
+
+    // Initialize on page load
+    loadSnapshot().then(() => {
+      connectSSE();
+    });
+  </script>
+</body>
+</html>

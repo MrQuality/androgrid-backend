@@ -47,6 +47,10 @@ service AdminService {
   // Generate an ephemeral device pairing token for mobile node onboarding.
   // Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
   rpc GeneratePairingToken(GeneratePairingTokenRequest) returns (GeneratePairingTokenResponse);
+
+  // List all known compute tasks and their lifecycle execution states.
+  // Traces to: [REQ-OP-004], [INV-004], [INV-005]
+  rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
 }
 
 // EnrollmentService provides bootstrap enrollment for unprovisioned worker nodes.
@@ -309,4 +313,33 @@ message EnrollWorkerResponse {
   string ca_cert_pem = 3;
   string error_message = 4;
 }
+
+// Request to list compute tasks and their lifecycle execution states.
+// Traces to: [REQ-OP-004], [INV-004], [INV-005]
+message ListTasksRequest {
+  TaskState state_filter = 1;
+}
+
+// Information snapshot for a compute task.
+// Traces to: [REQ-OP-004], [INV-004], [INV-005]
+message TaskInfo {
+  string task_id = 1;
+  TaskState state = 2;
+  ExecutionEngine engine = 3;
+  uint32 run_attempt = 4;
+  string assigned_node_id = 5;
+  uint32 timeout_seconds = 6;
+  bool requires_unmetered = 7;
+  int32 exit_code = 8;
+  uint64 execution_duration_ms = 9;
+  string error_message = 10;
+  string speculative_node_id = 11;
+}
+
+// Response containing compute tasks.
+// Traces to: [REQ-OP-004]
+message ListTasksResponse {
+  repeated TaskInfo tasks = 1;
+}
+
 

@@ -139,11 +139,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let artifact_listener = tokio::net::TcpListener::bind(config.artifact_listen_addr).await?;
     info!(
         artifact_addr = %config.artifact_listen_addr,
-        "Starting embedded HTTP static artifact & enrollment server [NFR-PERF-001], [REQ-OP-001]"
+        "Starting embedded HTTP static artifact, pairing & real-time web dashboard server [NFR-PERF-001], [REQ-OP-001], [INV-004], [INV-005]"
     );
-    ArtifactServer::spawn_with_enrollment(
+    ArtifactServer::spawn_full(
         artifact_listener,
         Arc::clone(&artifact_store),
+        Arc::clone(&scheduler),
         enrollment_ctx.clone(),
         artifact_shutdown_rx,
     );

@@ -522,3 +522,234 @@ fn test_github_pages_workflow_configuration_integrity() {
         "Workflow must trigger on main branch"
     );
 }
+
+/// Validates that demo animated showcase asset exists, is non-empty,
+/// and adheres to the strict 5 MB file size limit to prevent git bloat.
+///
+/// Traces to: [REQ-PUB-001], G-21
+#[test]
+fn test_showcase_demo_asset_exists_and_size_bounds() {
+    let docs_root = get_docs_root();
+    let demo_gif_path = docs_root.join("assets").join("demo.gif");
+
+    assert!(
+        demo_gif_path.exists(),
+        "docs/assets/demo.gif must exist at {:?}",
+        demo_gif_path
+    );
+
+    let metadata = fs::metadata(&demo_gif_path)
+        .unwrap_or_else(|_| panic!("Failed to read metadata of {:?}", demo_gif_path));
+
+    assert!(metadata.len() > 0, "demo.gif must not be empty");
+    assert!(
+        metadata.len() < 5_000_000,
+        "demo.gif must be under 5 MB to prevent git bloat, found {} bytes",
+        metadata.len()
+    );
+}
+
+/// Validates that the Mobile Cluster Economics and Battery FAQ chapter exists,
+/// provides empirical battery and thermal metrics, and cites key architectural invariants.
+///
+/// Traces to: [NFR-POW-001], [ANTI-001], [INV-003], [REQ-OP-003], G-21
+#[test]
+fn test_showcase_economics_faq_chapter_completeness() {
+    let docs_root = get_docs_root();
+    let faq_path = docs_root
+        .join("src")
+        .join("showcase")
+        .join("economics_faq.md");
+
+    assert!(
+        faq_path.exists(),
+        "docs/src/showcase/economics_faq.md must exist at {:?}",
+        faq_path
+    );
+
+    let content =
+        fs::read_to_string(&faq_path).expect("Failed to read docs/src/showcase/economics_faq.md");
+
+    // Battery longevity and charging limits
+    assert!(
+        content.contains("80%") || content.contains("80 %"),
+        "FAQ must explain battery charging limit ceiling (80%)"
+    );
+    assert!(
+        content.contains("chemical degradation") || content.contains("battery longevity"),
+        "FAQ must address chemical degradation and battery longevity"
+    );
+
+    // Thermal throttling hysteresis
+    assert!(
+        content.contains("38") && content.contains("35"),
+        "FAQ must cite 38 C cutoff and 35 C resume hysteresis thresholds"
+    );
+    assert!(
+        content.contains("hysteresis"),
+        "FAQ must detail thermal hysteresis dampening"
+    );
+
+    // Energy efficiency and ARM big.LITTLE
+    assert!(
+        content.contains("big.LITTLE") || content.contains("DynamIQ"),
+        "FAQ must analyze ARM big.LITTLE / DynamIQ efficiency"
+    );
+    assert!(
+        content.contains("Raspberry Pi") || content.contains("RPi"),
+        "FAQ must contrast mobile SoC efficiency against Raspberry Pi / x86"
+    );
+
+    // Zero hardware cost and drawer devices
+    assert!(
+        content.contains("zero-cost") || content.contains("drawer"),
+        "FAQ must articulate zero hardware cost of drawer smartphones"
+    );
+
+    // Key traceability identifiers
+    let required_identifiers = ["[NFR-POW-001]", "[ANTI-001]", "[INV-003]", "[REQ-OP-003]"];
+    for id in required_identifiers {
+        assert!(
+            content.contains(id),
+            "Economics FAQ must cite architectural identifier: {}",
+            id
+        );
+    }
+}
+
+/// Validates that the Ecosystem Overview landing page exists, maps all core repositories
+/// and specifications, and embeds a Mermaid architecture topology diagram.
+///
+/// Traces to: [REQ-PUB-001], G-21
+#[test]
+fn test_showcase_ecosystem_landing_page_and_navigation() {
+    let docs_root = get_docs_root();
+    let ecosystem_path = docs_root.join("src").join("showcase").join("ecosystem.md");
+
+    assert!(
+        ecosystem_path.exists(),
+        "docs/src/showcase/ecosystem.md must exist at {:?}",
+        ecosystem_path
+    );
+
+    let content =
+        fs::read_to_string(&ecosystem_path).expect("Failed to read docs/src/showcase/ecosystem.md");
+
+    // Must map all three pillars
+    assert!(
+        content.contains("androgrid-backend"),
+        "Ecosystem page must reference androgrid-backend"
+    );
+    assert!(
+        content.contains("androgrid-android"),
+        "Ecosystem page must reference androgrid-android"
+    );
+    assert!(
+        content.contains("AndroGrid_SDD.md") || content.contains("AG-SPEC-2026-V2"),
+        "Ecosystem page must reference master specification"
+    );
+
+    // Must contain Mermaid diagram
+    assert!(
+        content.contains("```mermaid"),
+        "Ecosystem page must include a Mermaid architecture diagram"
+    );
+
+    // Must link to external resources
+    assert!(
+        content.contains("dokka"),
+        "Ecosystem page must link to Dokka API documentation"
+    );
+}
+
+/// Validates that community launch templates are drafted for Hacker News, Reddit,
+/// and Lobste.rs with verified formatting.
+///
+/// Traces to: [REQ-PUB-001], G-21
+#[test]
+fn test_showcase_community_launch_blueprints_completeness() {
+    let docs_root = get_docs_root();
+    let launch_path = docs_root
+        .join("src")
+        .join("showcase")
+        .join("community_launch.md");
+
+    assert!(
+        launch_path.exists(),
+        "docs/src/showcase/community_launch.md must exist at {:?}",
+        launch_path
+    );
+
+    let content = fs::read_to_string(&launch_path)
+        .expect("Failed to read docs/src/showcase/community_launch.md");
+
+    let required_platforms = [
+        "Hacker News",
+        "Show HN",
+        "r/rust",
+        "r/selfhosted",
+        "Lobste.rs",
+    ];
+
+    for platform in required_platforms {
+        assert!(
+            content.contains(platform),
+            "Community launch blueprints must include template for: {}",
+            platform
+        );
+    }
+}
+
+/// Validates that ADR-004 is authored, accepted, and linked in SUMMARY.md.
+///
+/// Traces to: [REQ-PUB-001], G-21
+#[test]
+fn test_showcase_adr_004_exists_and_referenced() {
+    let docs_root = get_docs_root();
+    let adr_path = docs_root
+        .join("src")
+        .join("adr")
+        .join("ADR-004-community-showcase-and-demo-assets.md");
+
+    assert!(adr_path.exists(), "ADR-004 must exist at {:?}", adr_path);
+
+    let adr_content = fs::read_to_string(&adr_path).expect("Failed to read ADR-004");
+    assert!(
+        adr_content.contains("Status\nAccepted")
+            || adr_content.contains("Status:\nAccepted")
+            || adr_content.contains("## Status\nAccepted"),
+        "ADR-004 must be in Accepted status"
+    );
+
+    let summary_path = docs_root.join("src").join("SUMMARY.md");
+    let summary_content = fs::read_to_string(&summary_path).expect("Failed to read SUMMARY.md");
+
+    assert!(
+        summary_content.contains("ADR-004-community-showcase-and-demo-assets.md"),
+        "SUMMARY.md must reference ADR-004"
+    );
+}
+
+/// Validates that the repository root README embeds the demo GIF asset
+/// and includes community showcase navigation.
+///
+/// Traces to: [REQ-PUB-001], G-21
+#[test]
+fn test_readme_embeds_demo_asset_and_showcase_sections() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let readme_path = manifest_dir.join("README.md");
+
+    assert!(readme_path.exists(), "README.md must exist at root");
+
+    let readme_content = fs::read_to_string(&readme_path).expect("Failed to read README.md");
+
+    assert!(
+        readme_content.contains("docs/assets/demo.gif"),
+        "README.md must embed docs/assets/demo.gif"
+    );
+    assert!(
+        readme_content.contains("Community Showcase")
+            || readme_content.contains("Economics & Hardware Feasibility"),
+        "README.md must feature community showcase or feasibility section"
+    );
+}

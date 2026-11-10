@@ -13,6 +13,13 @@
   - [ADR-001: Documentation Portal](adr/ADR-001-documentation-portal.md)
   - [ADR-002: Release Automation](adr/ADR-002-release-automation.md)
   - [ADR-003: Distributed Image Benchmark Hero Workload](adr/ADR-003-distributed-image-benchmark.md)
+  - [ADR-004: Community Showcase and Demo Assets](adr/ADR-004-community-showcase-and-demo-assets.md)
+
+# Community Showcase & Hardware Feasibility
+
+- [Ecosystem Architecture & Navigation](showcase/ecosystem.md)
+- [Mobile Cluster Economics & Battery FAQ](showcase/economics_faq.md)
+- [Community Launch Blueprints & Pitch Copy](showcase/community_launch.md)
 
 # Mobile Worker Client
 

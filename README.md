@@ -10,7 +10,37 @@
 [![gRPC](https://img.shields.io/badge/RPC-Tonic%200.12-244c5a.svg)](https://github.com/hyperium/tonic)
 [![Security](https://img.shields.io/badge/Security-TLS%201.3%20mTLS-brightgreen.svg)](https://github.com/rustls/rustls)
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="AndroGrid Cluster Demonstration" width="850" />
+</p>
+
 The high-concurrency Rust control plane and task orchestrator for **AndroGrid**: a distributed edge-compute cluster that harnesses heterogeneous Android devices as worker compute nodes across local Wi-Fi and metered Cellular WAN connections.
+
+---
+
+## Community Showcase & Ecosystem Overview
+
+AndroGrid connects three foundational pillars to transform idle consumer mobile hardware into a resilient, private edge-compute cluster:
+
+1. **Host Control Plane (`androgrid-backend`):** High-concurrency task orchestrator coordinating monotonic fencing, dual assignment, and content-addressed bytecode delivery.
+2. **Mobile Worker Client (`androgrid-android`):** Native Android worker service running sandboxed WASI workloads via Chicory and Wasmtime with zero-keepalive cellular lifecycle.
+3. **Master Specification (`AndroGrid_SDD.md`):** ISO/IEC/IEEE 29148 requirements traceability matrix defining all state machines, protocol contracts, and security boundaries.
+
+For comprehensive architectural walkthroughs, visit the [Ecosystem Overview](docs/src/showcase/ecosystem.md).
+
+---
+
+## Mobile Cluster Economics & Hardware Feasibility FAQ
+
+Deploying cluster compute onto smartphones often raises valid concerns regarding hardware longevity and thermal impact:
+
+- **Battery Longevity (80% Charge Limit):** Android 14+ battery protection limits maximum charge to 80%, reducing cathode voltage stress and preventing electrolyte decomposition. Tasks are rejected below 20% battery (`[REQ-OP-003]`).
+- **Thermal Hysteresis Protection:** `ThermalSafetyGuard` cuts off computation if battery temperature exceeds 38 C or the OS reports `THERMAL_STATUS_SEVERE`. Computation resumes only after cooling to 35 C, eliminating start-stop thermal flapping.
+- **Superior Efficiency vs Raspberry Pi / x86:** ARM big.LITTLE mobile chips consume 15 mW to 50 mW in radio sleep, whereas a Raspberry Pi 4 consumes 2.5 W to 4.0 W continuously idling. Under cellular operation, sockets terminate within 200 ms (`[NFR-POW-001]`), permitting immediate baseband RRC low-power sleep.
+- **Zero Hardware Cost:** Transforms millions of unused drawer smartphones into private edge compute nodes with built-in battery backup (UPS), Wi-Fi 6, and hardware cryptographic accelerators.
+- **Zero Inbound Ports (`[INV-001]`):** Worker devices never expose listening ports. All connections originate outbound over mutual TLS 1.3 (`[INV-002]`).
+
+Read the complete empirical analysis in the [Mobile Economics & Battery FAQ](docs/src/showcase/economics_faq.md). Community launch templates are available in [Community Launch Blueprints](docs/src/showcase/community_launch.md).
 
 ---
 

@@ -69,11 +69,16 @@ openssl x509 -req -in client_node_pixel_7_01.csr \
   -out client_node_pixel_7_01.crt -days 365 -sha256
 
 # 4. Package the certificate, private key, and Root CA into an encrypted PKCS#12 bundle:
+# Note: Modern OpenSSL 3.x defaults to PBES2/AES-256 keybags which Android KeyStore fails to unwrap.
+# The explicit 3DES flags (-certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1) are required for Android compatibility.
 openssl pkcs12 -export \
   -inkey client_node_pixel_7_01.key \
   -in client_node_pixel_7_01.crt \
   -certfile deploy/pki/ca.crt \
   -out client.p12 \
+  -certpbe PBE-SHA1-3DES \
+  -keypbe PBE-SHA1-3DES \
+  -macalg sha1 \
   -password pass:androgrid_secure_pki
 ```
 
@@ -85,6 +90,9 @@ openssl pkcs12 -export \
 | `-genkey -noout` | Directly emits the private key in SEC1/PKCS#8 PEM format without printing curve parameter metadata. |
 | `-subj "/CN=.../O=..."` | Sets X.509 Distinguished Name fields. The Common Name (CN) is used by the orchestrator for node audit logging. |
 | `-export -out client.p12` | Constructs a PKCS#12 (PFX) cryptographic archive containing both the public certificate chain and the private key. |
+| `-certpbe PBE-SHA1-3DES` | Enforces 3DES PKCS#12 encryption for certificates, required by Android KeyStore BouncyCastle provider. |
+| `-keypbe PBE-SHA1-3DES` | Enforces 3DES PKCS#12 encryption for private key bags, preventing `exception unwrapping private key`. |
+| `-macalg sha1` | Enforces SHA-1 MAC digest for archive verification integrity under Android KeyStore provider expectations. |
 | `-password pass:androgrid_secure_pki` | Encrypts the PKCS#12 keystore using password-based encryption, protecting the private key in transit. |
 
 ### Provisioning `client.p12` to the Android Device
@@ -108,6 +116,16 @@ In the AndroGrid Worker application:
 
 In the application settings, configure the orchestrator target endpoint:
 
+- **Local Machine Testing with Physical Device over USB (ADB Reverse Tunnel):**
+  Use `127.0.0.1:50051`. Because physical hardware connected over USB resides in an isolated network namespace, reverse port forwarding must be configured from the host workstation:
+  ```bash
+  # Forward control plane mTLS gRPC traffic from phone to host:
+  adb reverse tcp:50051 tcp:50051
+
+  # Forward HTTP static artifact & pairing token traffic:
+  adb reverse tcp:50052 tcp:50052
+  ```
+  This routes connections made on the device to `127.0.0.1:50051` directly back to the orchestrator listening on the host machine.
 - **Local Machine Testing with Podman (Android Emulator):**
   Use `https://10.0.2.2:50051`. In the Android emulator, `10.0.2.2` automatically routes to host machine `localhost` where Podman publishes port `50051`.
 - **Local Machine Testing with Podman (Physical Device over Wi-Fi):**

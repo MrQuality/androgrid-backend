@@ -34,4 +34,4 @@
 
 # Alpha Testing & Hardware Verification
 
-- [Hardware Alpha Testing Guide - v0.0.1-alpha.1](testing/hardware_alpha_guide.md)
+- [Hardware Alpha Testing Guide - v0.0.1-alpha.2](testing/hardware_alpha_guide.md)

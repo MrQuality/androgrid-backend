@@ -267,6 +267,21 @@ impl AdminService for AdminServiceImpl {
             ));
         }
 
+        // Reserve protobuf framing overhead for FetchArtifactResponse (tag + varint + 64-char sha256)
+        // so any accepted artifact is guaranteed fetchable within MAX_FRAME_SIZE_BYTES [NFR-PERF-001].
+        let fetch_envelope_overhead = prost::Message::encoded_len(&crate::FetchArtifactResponse {
+            wasm_bytecode: Vec::new(),
+            artifact_sha256: "0".repeat(64),
+        }) + 8;
+        let max_artifact_bytes =
+            crate::MAX_FRAME_SIZE_BYTES.saturating_sub(fetch_envelope_overhead);
+        if bytecode.len() > max_artifact_bytes {
+            return Err(Status::resource_exhausted(format!(
+                "Artifact ({} bytes) exceeds maximum fetchable payload of {max_artifact_bytes} bytes inside 16 MB gRPC frame",
+                bytecode.len()
+            )));
+        }
+
         match self
             .artifact_store
             .store_artifact_verified(&bytecode, &req.expected_sha256)
@@ -362,6 +377,7 @@ mod tests {
     use super::*;
     use crate::{ExecutionEngine, NetworkTransportType, NodeCapabilities, TaskSpec, TaskState};
 
+    #[allow(deprecated)]
     fn make_test_task(task_id: &str) -> TaskSpec {
         TaskSpec {
             task_id: task_id.to_string(),
@@ -545,6 +561,7 @@ mod tests {
         assert_eq!(res_san.cluster_endpoint, "192.168.1.42:50051");
     }
 
+    #[allow(deprecated)]
     #[tokio::test]
     async fn test_submit_task_rejects_missing_external_artifact() {
         let scheduler = Arc::new(ClusterScheduler::new());
@@ -672,6 +689,29 @@ mod tests {
             }))
             .await
             .expect_err("16 MB payload + protobuf framing must be rejected");
-        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn test_upload_artifact_rejects_16mb_envelope_overflow() {
+        use crate::admin_service_server::AdminService;
+        use crate::{UploadArtifactRequest, MAX_FRAME_SIZE_BYTES};
+
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let svc = AdminServiceImpl::with_artifact_store(
+            scheduler,
+            artifact_store,
+            "http://127.0.0.1:50052".to_string(),
+        );
+
+        let err = svc
+            .upload_artifact(Request::new(UploadArtifactRequest {
+                bytecode: vec![0x61u8; MAX_FRAME_SIZE_BYTES],
+                expected_sha256: String::new(),
+            }))
+            .await
+            .expect_err("16 MB raw upload would overflow FetchArtifactResponse envelope");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
     }
 }

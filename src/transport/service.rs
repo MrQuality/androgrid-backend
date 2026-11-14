@@ -204,7 +204,13 @@ impl AndroGridService for AndroGridServiceImpl {
             wasm_bytecode,
             artifact_sha256: clean_sha,
         };
-        validate_frame_bound(prost::Message::encoded_len(&response))?;
+        let encoded_len = prost::Message::encoded_len(&response);
+        if encoded_len > crate::MAX_FRAME_SIZE_BYTES {
+            return Err(Status::resource_exhausted(format!(
+                "FetchArtifactResponse ({encoded_len} bytes) exceeds {} byte frame limit [NFR-PERF-001]",
+                crate::MAX_FRAME_SIZE_BYTES
+            )));
+        }
 
         Ok(Response::new(response))
     }

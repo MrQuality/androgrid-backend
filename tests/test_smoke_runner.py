@@ -120,6 +120,35 @@ class TestPkiManager(unittest.TestCase):
         self.assertEqual(paths["untrusted_cert"], Path("/tmp/pki_test/untrusted_client.crt"))
         self.assertNotIn("client_p12", paths)
 
+    @patch("subprocess.run")
+    def test_generate_invokes_cli_cert_init_and_issue_csr(self, mock_run):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = PkiManager(Path(tmp) / "pki")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            mgr.generate("node_smoke_01", additional_san="192.168.1.50")
+
+            calls = [c.args[0] for c in mock_run.call_args_list]
+            self.assertGreaterEqual(len(calls), 4)
+            self.assertIn("cert", calls[0])
+            self.assertIn("init", calls[0])
+            self.assertIn("--san", calls[0])
+            self.assertIn("192.168.1.50", calls[0])
+            csr_issue_calls = [c for c in calls if "issue" in c and "csr" in c]
+            self.assertEqual(len(csr_issue_calls), 1)
+            self.assertIn("node_smoke_01", csr_issue_calls[0])
+
+    @patch("subprocess.run")
+    def test_generate_fails_fast_when_cert_init_errors(self, mock_run):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = PkiManager(Path(tmp) / "pki")
+            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="invalid SAN")
+            with self.assertRaises(RuntimeError) as ctx:
+                mgr.generate("node_smoke_01")
+            self.assertIn("androgrid-cli cert init failed", str(ctx.exception))
+            self.assertEqual(mock_run.call_count, 1)
+
 
 class TestSmokeTestRunnerLifecycle(unittest.TestCase):
     """Tests end-to-end smoke test runner orchestration."""

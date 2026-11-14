@@ -301,9 +301,9 @@ class PkiManager:
             init_cmd.extend(["--san", additional_san])
         res = subprocess.run(init_cmd, cwd=str(backend_dir), capture_output=True, text=True, check=False)
         if res.returncode != 0:
-            print(f"[!] Warning: androgrid-cli cert init failed ({res.returncode}): {res.stderr}")
-            self._generate_direct(node_id, additional_san)
-            return
+            raise RuntimeError(
+                f"androgrid-cli cert init failed ({res.returncode}): {res.stderr.strip()}"
+            )
 
         # Generate worker CSR + sign offline via `androgrid-cli cert issue csr`
         subprocess.run(

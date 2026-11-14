@@ -7,26 +7,42 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tonic::{Request, Response, Status};
 
+use crate::artifact::store::ArtifactStore;
 use crate::proto::androgrid::v1::andro_grid_service_server::AndroGridService;
 use crate::scheduler::ClusterScheduler;
 use crate::transport::tls::AuthenticatedPeer;
 use crate::validate_frame_bound;
 use crate::{
-    ClaimCellularTaskRequest, ClaimCellularTaskResponse, RegisterNodeRequest, RegisterNodeResponse,
-    SubmitCellularResultRequest, SubmitCellularResultResponse, SyncNodeStateRequest,
-    SyncNodeStateResponse,
+    ClaimCellularTaskRequest, ClaimCellularTaskResponse, FetchArtifactRequest,
+    FetchArtifactResponse, RegisterNodeRequest, RegisterNodeResponse, SubmitCellularResultRequest,
+    SubmitCellularResultResponse, SyncNodeStateRequest, SyncNodeStateResponse,
 };
 
 /// Production implementation of AndroGridService backed by the cluster scheduler.
 #[derive(Debug, Clone)]
 pub struct AndroGridServiceImpl {
     scheduler: Arc<ClusterScheduler>,
+    artifact_store: Arc<ArtifactStore>,
 }
 
 impl AndroGridServiceImpl {
     /// Creates a new service instance bound to the provided scheduler.
     pub fn new(scheduler: Arc<ClusterScheduler>) -> Self {
-        Self { scheduler }
+        Self {
+            scheduler,
+            artifact_store: Arc::new(ArtifactStore::new()),
+        }
+    }
+
+    /// Creates a new service instance sharing the orchestrator's [`ArtifactStore`].
+    pub fn with_artifact_store(
+        scheduler: Arc<ClusterScheduler>,
+        artifact_store: Arc<ArtifactStore>,
+    ) -> Self {
+        Self {
+            scheduler,
+            artifact_store,
+        }
     }
 
     /// Helper to get current epoch timestamp in seconds.
@@ -149,5 +165,37 @@ impl AndroGridService for AndroGridServiceImpl {
         let response = self.scheduler.submit_cellular_result(&req)?;
 
         Ok(Response::new(response))
+    }
+
+    /// Content-addressed WASM artifact retrieval over the authenticated mTLS 1.3 channel.
+    ///
+    /// Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+    async fn fetch_artifact(
+        &self,
+        request: Request<FetchArtifactRequest>,
+    ) -> Result<Response<FetchArtifactResponse>, Status> {
+        let req = request.into_inner();
+        let clean_sha = req.artifact_sha256.trim().to_ascii_lowercase();
+        if clean_sha.len() != 64 || !clean_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Status::invalid_argument(
+                "artifact_sha256 must be a 64-character hexadecimal SHA-256 digest",
+            ));
+        }
+
+        let wasm_bytecode = self
+            .artifact_store
+            .get_artifact(&clean_sha)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "Artifact '{clean_sha}' not found in orchestrator store"
+                ))
+            })?;
+
+        validate_frame_bound(wasm_bytecode.len())?;
+
+        Ok(Response::new(FetchArtifactResponse {
+            wasm_bytecode,
+            artifact_sha256: clean_sha,
+        }))
     }
 }

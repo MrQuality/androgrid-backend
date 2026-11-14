@@ -278,6 +278,14 @@ fn spike_tonic_service_trait_definition_presence() {
                 status_message: "Committed".to_string(),
             }))
         }
+
+        async fn fetch_artifact(
+            &self,
+            _request: tonic::Request<androgrid_backend::FetchArtifactRequest>,
+        ) -> Result<tonic::Response<androgrid_backend::FetchArtifactResponse>, tonic::Status>
+        {
+            Err(tonic::Status::not_found("Not found"))
+        }
     }
 
     let service = MockService;

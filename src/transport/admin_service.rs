@@ -119,6 +119,20 @@ impl AdminService for AdminServiceImpl {
             ));
         }
 
+        if task.engine == crate::ExecutionEngine::WasmWasi as i32 && task.wasm_bytecode.is_empty() {
+            let clean_sha = task.artifact_sha256.trim().to_ascii_lowercase();
+            if clean_sha.len() != 64 || !clean_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Status::invalid_argument(
+                    "WASM task with empty wasm_bytecode requires a valid 64-char artifact_sha256",
+                ));
+            }
+            if self.artifact_store.get_artifact(&clean_sha).is_none() {
+                return Err(Status::failed_precondition(format!(
+                    "Artifact '{clean_sha}' is not present in orchestrator ArtifactStore; upload it via UploadArtifact first"
+                )));
+            }
+        }
+
         match self.scheduler.submit_task(task) {
             Ok(()) => Ok(Response::new(SubmitTaskResponse {
                 accepted: true,
@@ -529,5 +543,100 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(res_san.cluster_endpoint, "192.168.1.42:50051");
+    }
+
+    #[tokio::test]
+    async fn test_submit_task_rejects_missing_external_artifact() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let token_store = Arc::new(PairingTokenStore::default());
+        let service = AdminServiceImpl::with_services(
+            scheduler,
+            Arc::clone(&artifact_store),
+            "http://127.0.0.1:50052".to_string(),
+            token_store,
+            "fp_abc".to_string(),
+            "https://127.0.0.1:50051".to_string(),
+        );
+
+        let missing_sha = "a".repeat(64);
+        let err = service
+            .submit_task(Request::new(SubmitTaskRequest {
+                task: Some(TaskSpec {
+                    task_id: "missing-artifact-task".to_string(),
+                    engine: ExecutionEngine::WasmWasi as i32,
+                    artifact_sha256: missing_sha,
+                    artifact_url: "https://external.example.com/mod.wasm".to_string(),
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect_err("Missing artifact in store must fail fast");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+
+        let wasm_bytes = b"\x00asm\x01\x00\x00\x00".to_vec();
+        let upload = service
+            .upload_artifact(Request::new(UploadArtifactRequest {
+                bytecode: wasm_bytes,
+                expected_sha256: String::new(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let ok = service
+            .submit_task(Request::new(SubmitTaskRequest {
+                task: Some(TaskSpec {
+                    task_id: "uploaded-artifact-task".to_string(),
+                    engine: ExecutionEngine::WasmWasi as i32,
+                    artifact_sha256: upload.artifact_sha256,
+                    artifact_url: upload.artifact_url,
+                    ..Default::default()
+                }),
+            }))
+            .await
+            .expect("Uploaded artifact task must be accepted")
+            .into_inner();
+        assert!(ok.accepted);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_artifact_round_trip_and_errors() {
+        use crate::andro_grid_service_server::AndroGridService;
+        use crate::transport::service::AndroGridServiceImpl;
+        use crate::FetchArtifactRequest;
+
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let wasm_bytes = b"\x00asm\x01\x00\x00\x00".to_vec();
+        let sha256 = artifact_store.store_artifact(&wasm_bytes).unwrap();
+
+        let svc = AndroGridServiceImpl::with_artifact_store(scheduler, artifact_store);
+
+        let fetched = svc
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                artifact_sha256: sha256.clone(),
+            }))
+            .await
+            .expect("FetchArtifact must return stored bytecode")
+            .into_inner();
+        assert_eq!(fetched.wasm_bytecode, wasm_bytes);
+        assert_eq!(fetched.artifact_sha256, sha256);
+
+        let not_found = svc
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                artifact_sha256: "b".repeat(64),
+            }))
+            .await
+            .expect_err("Unknown sha256 must return NotFound");
+        assert_eq!(not_found.code(), tonic::Code::NotFound);
+
+        let invalid = svc
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                artifact_sha256: "../etc/passwd".to_string(),
+            }))
+            .await
+            .expect_err("Invalid sha256 must return InvalidArgument");
+        assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
     }
 }

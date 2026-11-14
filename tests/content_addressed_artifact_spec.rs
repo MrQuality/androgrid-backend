@@ -66,6 +66,9 @@ impl TestPki {
         client_params
             .distinguished_name
             .push(DnType::CommonName, "operator");
+        client_params
+            .distinguished_name
+            .push(DnType::OrganizationalUnitName, "Control Plane");
         let client_key = KeyPair::generate().expect("Failed to generate client key");
         let client_cert = client_params
             .signed_by(&client_key, &ca_cert, &ca_key)

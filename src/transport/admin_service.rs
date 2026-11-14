@@ -83,13 +83,13 @@ impl AdminServiceImpl {
         }
     }
 
-    /// Rejects worker client certificates (`OU = Edge Compute`) from calling
-    /// privileged operator endpoints on `AdminService`.
+    /// Enforces a positive allowlist requiring operator certificates
+    /// (`OU = Control Plane`) when mTLS identity metadata is attached.
     fn authorize_admin_peer<T>(request: &Request<T>) -> Result<(), Status> {
         if let Some(peer) = request.extensions().get::<AuthenticatedPeer>() {
-            if peer.organizational_unit.as_deref() == Some("Edge Compute") {
+            if peer.organizational_unit.as_deref() != Some("Control Plane") {
                 return Err(Status::permission_denied(
-                    "Worker certificates (OU=Edge Compute) are not authorized for AdminService",
+                    "AdminService requires an operator certificate with OU=Control Plane",
                 ));
             }
         }

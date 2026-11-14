@@ -566,4 +566,41 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
         .await
         .expect_err("Worker cert must be denied on AdminService");
     assert_eq!(admin_err.code(), tonic::Code::PermissionDenied);
+
+    // 6. Operator cert (OU=Control Plane) succeeds on AdminService [INV-002]
+    let ca_key = KeyPair::from_pem(&pki.ca_key_pem).unwrap();
+    let ca_params = CertificateParams::from_ca_cert_pem(&pki.ca_cert_pem).unwrap();
+    let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+    let mut op_params = CertificateParams::default();
+    op_params
+        .distinguished_name
+        .push(DnType::CommonName, "operator");
+    op_params
+        .distinguished_name
+        .push(DnType::OrganizationalUnitName, "Control Plane");
+    let op_key = KeyPair::generate().unwrap();
+    let op_cert = op_params.signed_by(&op_key, &ca_cert, &ca_key).unwrap();
+    let op_tls = build_client_mtls_config(
+        op_cert.pem().as_bytes(),
+        op_key.serialize_pem().as_bytes(),
+        pki.ca_cert_pem.as_bytes(),
+        "localhost",
+    );
+    let op_channel = tonic::transport::Endpoint::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(op_tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut op_admin =
+        androgrid_backend::proto::androgrid::v1::admin_service_client::AdminServiceClient::new(
+            op_channel,
+        );
+    let list_res = op_admin
+        .list_worker_nodes(androgrid_backend::ListWorkerNodesRequest {})
+        .await
+        .expect("Operator cert (OU=Control Plane) must succeed on AdminService")
+        .into_inner();
+    assert_eq!(list_res.nodes.len(), 1);
 }

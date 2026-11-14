@@ -88,19 +88,37 @@ fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
     let (_, cert) = x509_parser::parse_x509_certificate(der)
         .map_err(|e| Status::unauthenticated(format!("Invalid client X.509 certificate: {e}")))?;
 
-    let common_name = cert
-        .subject()
-        .iter_common_name()
-        .next()
-        .and_then(|attr| attr.as_str().ok())
-        .map(str::to_string);
+    let mut cns = cert.subject().iter_common_name();
+    let common_name = match cns.next() {
+        Some(attr) => {
+            let s = attr.as_str().map_err(|e| {
+                Status::unauthenticated(format!("Invalid client certificate CN attribute: {e}"))
+            })?;
+            if cns.next().is_some() {
+                return Err(Status::unauthenticated(
+                    "Client certificate must not contain multiple CN attributes",
+                ));
+            }
+            Some(s.to_string())
+        }
+        None => None,
+    };
 
-    let organizational_unit = cert
-        .subject()
-        .iter_organizational_unit()
-        .next()
-        .and_then(|attr| attr.as_str().ok())
-        .map(str::to_string);
+    let mut ous = cert.subject().iter_organizational_unit();
+    let organizational_unit = match ous.next() {
+        Some(attr) => {
+            let s = attr.as_str().map_err(|e| {
+                Status::unauthenticated(format!("Invalid client certificate OU attribute: {e}"))
+            })?;
+            if ous.next().is_some() {
+                return Err(Status::unauthenticated(
+                    "Client certificate must not contain multiple OU attributes",
+                ));
+            }
+            Some(s.to_string())
+        }
+        None => None,
+    };
 
     Ok(AuthenticatedPeer {
         common_name,

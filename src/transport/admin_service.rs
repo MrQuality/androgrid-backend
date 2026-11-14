@@ -305,11 +305,19 @@ impl AdminService for AdminServiceImpl {
             .generate_token(target_node_id.clone(), ttl)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
-        let cluster_endpoint = if !req.san.trim().is_empty() {
-            crate::pairing::strip_uri_scheme(&req.san)
+        let default_port = crate::pairing::strip_uri_scheme(&self.cluster_endpoint)
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .unwrap_or(50051);
+
+        let raw_endpoint = if !req.san.trim().is_empty() {
+            &req.san
         } else {
-            crate::pairing::strip_uri_scheme(&self.cluster_endpoint)
+            &self.cluster_endpoint
         };
+        let cluster_endpoint =
+            crate::pairing::normalize_cluster_endpoint(raw_endpoint, default_port)
+                .map_err(Status::invalid_argument)?;
 
         let payload = PairingPayload {
             cluster_endpoint: cluster_endpoint.clone(),

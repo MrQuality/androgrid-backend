@@ -819,11 +819,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             san,
             output_png,
         } => {
+            let effective_san = san.unwrap_or_else(|| {
+                let stripped = androgrid_backend::pairing::strip_uri_scheme(&cli.endpoint);
+                let host = stripped.split(':').next().unwrap_or("");
+                if matches!(host, "" | "127.0.0.1" | "localhost" | "0.0.0.0" | "::1") {
+                    String::new()
+                } else {
+                    stripped
+                }
+            });
             let res = client
                 .generate_pairing_token(GeneratePairingTokenRequest {
                     node_id: node_id.unwrap_or_default(),
                     expires_in_seconds: expires_in,
-                    san: san.unwrap_or_default(),
+                    san: effective_san,
                 })
                 .await?
                 .into_inner();

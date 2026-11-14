@@ -24,17 +24,82 @@ pub enum QrError {
     ImageSave { path: String, detail: String },
 }
 
-/// Strips `https://` or `http://` URI scheme prefixes and trailing slashes from an endpoint string
-/// so mobile gRPC channel builders receive a canonical `host:port` target.
+/// Strips URI scheme prefixes (case-insensitive `https://`, `http://`, `grpcs://`, `grpc://`)
+/// and any trailing path/slashes from an endpoint string so mobile gRPC channel builders
+/// receive a canonical `host[:port]` target.
 ///
 /// Traces to: [REQ-OP-001], [INV-002]
 pub fn strip_uri_scheme(endpoint: &str) -> String {
     let trimmed = endpoint.trim();
-    let without_scheme = trimmed
-        .strip_prefix("https://")
-        .or_else(|| trimmed.strip_prefix("http://"))
-        .unwrap_or(trimmed);
-    without_scheme.trim_end_matches('/').to_string()
+    let without_scheme = if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "https" | "http" | "grpcs" | "grpc"
+        ) {
+            rest
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let authority = without_scheme
+        .split_once('/')
+        .map(|(auth, _)| auth)
+        .unwrap_or(without_scheme);
+    authority.trim_end_matches('/').to_string()
+}
+
+/// Normalizes a cluster endpoint into canonical `host:port` form for mobile QR payloads.
+///
+/// - Strips URI schemes (`http://`, `https://`, `grpc://`, `grpcs://`, case-insensitive) and paths.
+/// - Rejects unspecified bind addresses (`0.0.0.0`, `::`, `[::]`) that mobile workers cannot route to.
+/// - Appends `:{default_port}` when no port is present.
+///
+/// Traces to: [REQ-OP-001], [INV-002]
+pub fn normalize_cluster_endpoint(endpoint: &str, default_port: u16) -> Result<String, String> {
+    let authority = strip_uri_scheme(endpoint);
+    if authority.is_empty() {
+        return Err("Cluster endpoint cannot be empty".to_string());
+    }
+
+    let (host, has_port) = if authority.starts_with('[') {
+        if let Some(end_bracket) = authority.find(']') {
+            let host_part = &authority[..=end_bracket];
+            let rest = &authority[end_bracket + 1..];
+            let has_port = rest
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && p.parse::<u16>().is_ok());
+            (host_part, has_port)
+        } else {
+            return Err(format!("Malformed IPv6 endpoint '{authority}'"));
+        }
+    } else if let Some((host_part, port_part)) = authority.rsplit_once(':') {
+        if !host_part.contains(':') && !port_part.is_empty() && port_part.parse::<u16>().is_ok() {
+            (host_part, true)
+        } else if authority.contains(':') {
+            // Unbracketed IPv6 literal without port
+            (authority.as_str(), false)
+        } else {
+            return Err(format!("Invalid port in endpoint '{authority}'"));
+        }
+    } else {
+        (authority.as_str(), false)
+    };
+
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Err(format!(
+            "Cluster endpoint '{authority}' uses an unspecified bind address; pass --san <LAN_IP_OR_HOST:PORT>"
+        ));
+    }
+
+    if has_port {
+        Ok(authority)
+    } else if host.contains(':') && !host.starts_with('[') {
+        Ok(format!("[{host}]:{default_port}"))
+    } else {
+        Ok(format!("{host}:{default_port}"))
+    }
 }
 
 /// Compact device pairing payload scanned by the Android worker.
@@ -206,5 +271,23 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
 
         let _ = std::fs::remove_file(&png_path);
+    }
+
+    #[test]
+    fn test_normalize_cluster_endpoint() {
+        assert_eq!(
+            normalize_cluster_endpoint("HTTPS://192.168.1.50:50051/enroll", 50051).unwrap(),
+            "192.168.1.50:50051"
+        );
+        assert_eq!(
+            normalize_cluster_endpoint("grpc.androgrid.internal", 50051).unwrap(),
+            "grpc.androgrid.internal:50051"
+        );
+        assert_eq!(
+            normalize_cluster_endpoint("[::1]", 50051).unwrap(),
+            "[::1]:50051"
+        );
+        assert!(normalize_cluster_endpoint("0.0.0.0:50051", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::]:50051", 50051).is_err());
     }
 }

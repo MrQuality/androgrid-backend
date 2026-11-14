@@ -231,7 +231,7 @@ Scan this QR code from the AndroGrid Android worker application:
 
 --------------------------------------------------------------------------------
 Pairing Details (Manual Fallback):
-  Endpoint:       https://127.0.0.1:50051
+  Endpoint:       127.0.0.1:50051
   CA Fingerprint: 3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a
   Pairing Token:  8a7f92e104b281f6d3910c2834b71940
   Bound Node ID:  node_pixel_7_01
@@ -239,7 +239,7 @@ Pairing Details (Manual Fallback):
   QR Image PNG:   ./pairing_qr.png
 --------------------------------------------------------------------------------
 Raw Scannable Payload:
-{"cluster_endpoint":"https://127.0.0.1:50051","ca_fingerprint":"3c79...","pairing_token":"8a7f...","node_id":"node_pixel_7_01","expires_at_epoch_s":1700000300}
+{"cluster_endpoint":"127.0.0.1:50051","ca_fingerprint":"3c79...","pairing_token":"8a7f...","node_id":"node_pixel_7_01","expires_at_epoch_s":1700000300}
 ================================================================================
 ```
 
@@ -255,11 +255,11 @@ Expected JSON Output:
 ```json
 {
   "pairing_token": "8a7f92e104b281f6d3910c2834b71940",
-  "cluster_endpoint": "https://127.0.0.1:50051",
+  "cluster_endpoint": "127.0.0.1:50051",
   "ca_fingerprint": "3c79a8bc43f55de17e88ef22ad71e860951a8bc4953c52e42efaa7be04294d1a",
   "node_id": "node_pixel_7_01",
   "expires_at_epoch_seconds": 1700000300,
-  "pairing_payload_json": "{\"cluster_endpoint\":\"https://127.0.0.1:50051\",\"ca_fingerprint\":\"3c79...\",\"pairing_token\":\"8a7f...\",\"node_id\":\"node_pixel_7_01\",\"expires_at_epoch_s\":1700000300}",
+  "pairing_payload_json": "{\"cluster_endpoint\":\"127.0.0.1:50051\",\"ca_fingerprint\":\"3c79...\",\"pairing_token\":\"8a7f...\",\"node_id\":\"node_pixel_7_01\",\"expires_at_epoch_s\":1700000300}",
   "output_png": null
 }
 ```

@@ -103,14 +103,14 @@ tar -xzf androgrid-v0.0.1-alpha.2-x86_64-unknown-linux-gnu.tar.gz
 
 # Start pairing session and print ASCII QR code in your terminal:
 # For local USB testing over ADB reverse tunnel:
-./androgrid-cli pair --endpoint "127.0.0.1:50051"
+./androgrid-cli --endpoint "https://127.0.0.1:50051" pair --san "127.0.0.1:50051"
 
-# For LAN Wi-Fi testing:
-./androgrid-cli pair --endpoint "192.168.1.100:50051"
+# For LAN Wi-Fi testing (pass your workstation LAN IP via --san when the server binds 0.0.0.0):
+./androgrid-cli --endpoint "https://127.0.0.1:50051" pair --san "192.168.1.100:50051"
 ```
 
 > [!NOTE]
-> **Raw Host:Port Syntax Required:** The `--endpoint` flag embedded in the QR code payload must be a raw `host:port` string (e.g., `127.0.0.1:50051`). Do not prepend protocol schemes such as `https://`, as the Android URI parser expects pure host and port values.
+> **Raw Host:Port in QR Payloads:** `androgrid-cli` connects to the orchestrator using `--endpoint` (which accepts `https://...`), while `--san` sets the routable `host:port` target embedded inside the QR payload for the Android worker (scheme-free `host:port` without `https://`).
 
 The CLI displays an ephemeral pairing token formatted as an ASCII QR code with a 5-minute expiry window.
 

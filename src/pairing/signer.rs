@@ -7,10 +7,11 @@
 
 use rcgen::{
     Certificate, CertificateParams, CertificateSigningRequestParams, DnType,
-    ExtendedKeyUsagePurpose, KeyPair, KeyUsagePurpose,
+    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use time::{Duration, OffsetDateTime};
 
 /// Errors arising during Root CA loading, CSR validation, or certificate signing.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -23,6 +24,12 @@ pub enum SignerError {
 
     #[error("Failed to reconstruct CA certificate context: {0}")]
     CaReconstructionError(String),
+
+    #[error("Certificate provided as Root CA is not a CA (BasicConstraints CA:TRUE required)")]
+    NotACaCertificate,
+
+    #[error("Expected a single Root CA certificate in PEM input, found {0}")]
+    MultipleCertificatesInCaPem(usize),
 
     #[error("Invalid PKCS#10 Certificate Signing Request (CSR) PEM: {0}")]
     InvalidCsr(String),
@@ -73,6 +80,27 @@ impl CaSigner {
     /// * `Ok(CaSigner)` ready to sign worker CSRs.
     /// * `Err(SignerError)` if certificate or key parsing fails.
     pub fn from_pem(ca_cert_pem: &str, ca_key_pem: &str) -> Result<Self, SignerError> {
+        let cert_blocks: Vec<pem::Pem> = pem::parse_many(ca_cert_pem)
+            .map_err(|e| SignerError::CaCertParseError(e.to_string()))?
+            .into_iter()
+            .filter(|p| p.tag() == "CERTIFICATE")
+            .collect();
+
+        if cert_blocks.is_empty() {
+            return Err(SignerError::CaCertParseError(
+                "No CERTIFICATE PEM block found".to_string(),
+            ));
+        }
+        if cert_blocks.len() > 1 {
+            return Err(SignerError::MultipleCertificatesInCaPem(cert_blocks.len()));
+        }
+
+        let (_, parsed_ca) = x509_parser::parse_x509_certificate(cert_blocks[0].contents())
+            .map_err(|e| SignerError::CaCertParseError(e.to_string()))?;
+        if !parsed_ca.is_ca() {
+            return Err(SignerError::NotACaCertificate);
+        }
+
         let ca_key = KeyPair::from_pem(ca_key_pem)
             .map_err(|e| SignerError::CaKeyParseError(e.to_string()))?;
 
@@ -84,7 +112,9 @@ impl CaSigner {
             .map_err(|e| SignerError::CaReconstructionError(e.to_string()))?;
 
         // Calculate Root CA SHA-256 fingerprint from the original certificate DER representation
-        let ca_fingerprint = Self::compute_ca_fingerprint(ca_cert_pem)?;
+        let mut hasher = Sha256::new();
+        hasher.update(cert_blocks[0].contents());
+        let ca_fingerprint = format!("{:x}", hasher.finalize());
 
         Ok(Self {
             ca_cert_pem: ca_cert_pem.trim().to_string(),
@@ -92,6 +122,17 @@ impl CaSigner {
             ca_cert,
             ca_key,
         })
+    }
+
+    /// Signs arbitrary leaf [`CertificateParams`] using the loaded Root CA.
+    pub(crate) fn sign_leaf_params(
+        &self,
+        params: CertificateParams,
+        leaf_key: &KeyPair,
+    ) -> Result<Certificate, SignerError> {
+        params
+            .signed_by(leaf_key, &self.ca_cert, &self.ca_key)
+            .map_err(|e| SignerError::SigningFailed(e.to_string()))
     }
 
     /// Computes the SHA-256 fingerprint from an arbitrary Root CA certificate PEM string.
@@ -131,6 +172,25 @@ impl CaSigner {
         csr_pem: &str,
         expected_node_id: &str,
     ) -> Result<SignedWorkerCert, SignerError> {
+        self.sign_worker_csr_with_days(csr_pem, expected_node_id, 365)
+    }
+
+    /// Validates an incoming PKCS#10 CSR and signs a new worker client certificate
+    /// with an explicit validity duration in days.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn sign_worker_csr_with_days(
+        &self,
+        csr_pem: &str,
+        expected_node_id: &str,
+        days_valid: u32,
+    ) -> Result<SignedWorkerCert, SignerError> {
+        if days_valid == 0 {
+            return Err(SignerError::SigningFailed(
+                "Certificate validity days must be greater than 0".to_string(),
+            ));
+        }
+
         let mut csr_params = CertificateSigningRequestParams::from_pem(csr_pem)
             .map_err(|e| SignerError::InvalidCsr(e.to_string()))?;
 
@@ -156,15 +216,16 @@ impl CaSigner {
         sanitized_dn.push(DnType::OrganizationalUnitName, "Edge Compute");
         csr_params.params.distinguished_name = sanitized_dn;
 
-        // Configure standard worker certificate extensions:
-        // Client authentication only, ECDSA digitalSignature only (RFC 5280)
-        csr_params
-            .params
-            .insert_extended_key_usage(ExtendedKeyUsagePurpose::ClientAuth);
-        csr_params
-            .params
-            .key_usages
-            .push(KeyUsagePurpose::DigitalSignature);
+        // Explicitly reset untrusted CSR extensions to prevent privilege/SAN injection:
+        // Client authentication only, ECDSA digitalSignature only, CA:FALSE, zero SANs.
+        csr_params.params.is_ca = IsCa::NoCa;
+        csr_params.params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        csr_params.params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        csr_params.params.subject_alt_names.clear();
+
+        let now = OffsetDateTime::now_utc();
+        csr_params.params.not_before = now - Duration::minutes(5);
+        csr_params.params.not_after = now + Duration::days(i64::from(days_valid));
 
         // Sign the CSR using the Root CA
         let signed_cert = csr_params
@@ -279,5 +340,83 @@ mod tests {
             SignerError::InvalidCsr(_) => {}
             other => panic!("Expected InvalidCsr, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_sign_worker_csr_strips_malicious_extensions_and_sans() {
+        let (ca_cert_pem, ca_key_pem) = generate_test_ca();
+        let signer = CaSigner::from_pem(&ca_cert_pem, &ca_key_pem).unwrap();
+
+        let mut malicious_params =
+            CertificateParams::new(vec!["evil.internal".to_string()]).unwrap();
+        malicious_params
+            .distinguished_name
+            .push(DnType::CommonName, "node-malicious");
+        malicious_params
+            .distinguished_name
+            .push(DnType::OrganizationalUnitName, "Control Plane");
+        malicious_params.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::CodeSigning,
+        ];
+        let worker_key = KeyPair::generate().unwrap();
+        let csr_pem = malicious_params
+            .serialize_request(&worker_key)
+            .unwrap()
+            .pem()
+            .unwrap();
+
+        let signed = signer
+            .sign_worker_csr(&csr_pem, "node-malicious")
+            .expect("Sanitized signing should succeed");
+
+        let parsed_pem = pem::parse(&signed.client_cert_pem).unwrap();
+        let (_, cert) = x509_parser::parse_x509_certificate(parsed_pem.contents()).unwrap();
+
+        assert!(!cert.is_ca(), "Signed worker cert must never be a CA");
+        assert!(
+            cert.subject_alternative_name().unwrap().is_none(),
+            "SANs from untrusted CSR must be stripped"
+        );
+        let ou = cert
+            .subject()
+            .iter_organizational_unit()
+            .next()
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(ou, "Edge Compute");
+
+        let eku = cert.extended_key_usage().unwrap().unwrap().value;
+        assert!(eku.client_auth);
+        assert!(!eku.server_auth);
+        assert!(!eku.code_signing);
+
+        let ku = cert.key_usage().unwrap().unwrap().value;
+        assert!(ku.digital_signature());
+        assert!(!ku.key_cert_sign());
+    }
+
+    #[test]
+    fn test_ca_signer_rejects_non_ca_certificate() {
+        let (ca_cert_pem, ca_key_pem) = generate_test_ca();
+        let signer = CaSigner::from_pem(&ca_cert_pem, &ca_key_pem).unwrap();
+        let (csr_pem, worker_key) = generate_test_csr("node-leaf");
+        let signed = signer.sign_worker_csr(&csr_pem, "node-leaf").unwrap();
+
+        let err = CaSigner::from_pem(&signed.client_cert_pem, &worker_key.serialize_pem())
+            .err()
+            .expect("Leaf cert must not be accepted as CA");
+        assert_eq!(err, SignerError::NotACaCertificate);
+    }
+
+    #[test]
+    fn test_ca_signer_rejects_multi_cert_fullchain() {
+        let (ca_cert_pem, ca_key_pem) = generate_test_ca();
+        let fullchain = format!("{}\n{}", ca_cert_pem, ca_cert_pem);
+        let err = CaSigner::from_pem(&fullchain, &ca_key_pem)
+            .err()
+            .expect("Multi-cert PEM must be rejected as Root CA");
+        assert_eq!(err, SignerError::MultipleCertificatesInCaPem(2));
     }
 }

@@ -31,6 +31,9 @@ pub enum SignerError {
     #[error("Expected a single Root CA certificate in PEM input, found {0}")]
     MultipleCertificatesInCaPem(usize),
 
+    #[error("Root CA private key does not match the public key in the Root CA certificate")]
+    CaKeyMismatch,
+
     #[error("Invalid PKCS#10 Certificate Signing Request (CSR) PEM: {0}")]
     InvalidCsr(String),
 
@@ -80,22 +83,9 @@ impl CaSigner {
     /// * `Ok(CaSigner)` ready to sign worker CSRs.
     /// * `Err(SignerError)` if certificate or key parsing fails.
     pub fn from_pem(ca_cert_pem: &str, ca_key_pem: &str) -> Result<Self, SignerError> {
-        let cert_blocks: Vec<pem::Pem> = pem::parse_many(ca_cert_pem)
-            .map_err(|e| SignerError::CaCertParseError(e.to_string()))?
-            .into_iter()
-            .filter(|p| p.tag() == "CERTIFICATE")
-            .collect();
+        let ca_cert_der = parse_single_cert_der(ca_cert_pem)?;
 
-        if cert_blocks.is_empty() {
-            return Err(SignerError::CaCertParseError(
-                "No CERTIFICATE PEM block found".to_string(),
-            ));
-        }
-        if cert_blocks.len() > 1 {
-            return Err(SignerError::MultipleCertificatesInCaPem(cert_blocks.len()));
-        }
-
-        let (_, parsed_ca) = x509_parser::parse_x509_certificate(cert_blocks[0].contents())
+        let (_, parsed_ca) = x509_parser::parse_x509_certificate(&ca_cert_der)
             .map_err(|e| SignerError::CaCertParseError(e.to_string()))?;
         if !parsed_ca.is_ca() {
             return Err(SignerError::NotACaCertificate);
@@ -103,6 +93,10 @@ impl CaSigner {
 
         let ca_key = KeyPair::from_pem(ca_key_pem)
             .map_err(|e| SignerError::CaKeyParseError(e.to_string()))?;
+
+        if parsed_ca.public_key().raw != ca_key.public_key_der() {
+            return Err(SignerError::CaKeyMismatch);
+        }
 
         let ca_params = CertificateParams::from_ca_cert_pem(ca_cert_pem)
             .map_err(|e| SignerError::CaCertParseError(e.to_string()))?;
@@ -113,7 +107,7 @@ impl CaSigner {
 
         // Calculate Root CA SHA-256 fingerprint from the original certificate DER representation
         let mut hasher = Sha256::new();
-        hasher.update(cert_blocks[0].contents());
+        hasher.update(&ca_cert_der);
         let ca_fingerprint = format!("{:x}", hasher.finalize());
 
         Ok(Self {
@@ -139,10 +133,9 @@ impl CaSigner {
     ///
     /// Traces to: [NFR-SEC-001]
     pub fn compute_ca_fingerprint(ca_cert_pem: &str) -> Result<String, SignerError> {
-        let parsed_pem =
-            pem::parse(ca_cert_pem).map_err(|e| SignerError::CaCertParseError(e.to_string()))?;
+        let ca_cert_der = parse_single_cert_der(ca_cert_pem)?;
         let mut hasher = Sha256::new();
-        hasher.update(parsed_pem.contents());
+        hasher.update(&ca_cert_der);
         Ok(format!("{:x}", hasher.finalize()))
     }
 
@@ -250,6 +243,26 @@ fn dn_value_to_string(val: &rcgen::DnValue) -> Option<String> {
         rcgen::DnValue::Ia5String(s) => Some(s.as_str().to_string()),
         _ => None,
     }
+}
+
+/// Parses a PEM string and returns the DER bytes of a single `CERTIFICATE` block.
+fn parse_single_cert_der(ca_cert_pem: &str) -> Result<Vec<u8>, SignerError> {
+    let cert_blocks: Vec<pem::Pem> = pem::parse_many(ca_cert_pem)
+        .map_err(|e| SignerError::CaCertParseError(e.to_string()))?
+        .into_iter()
+        .filter(|p| p.tag() == "CERTIFICATE")
+        .collect();
+
+    if cert_blocks.is_empty() {
+        return Err(SignerError::CaCertParseError(
+            "No CERTIFICATE PEM block found".to_string(),
+        ));
+    }
+    if cert_blocks.len() > 1 {
+        return Err(SignerError::MultipleCertificatesInCaPem(cert_blocks.len()));
+    }
+
+    Ok(cert_blocks.into_iter().next().unwrap().into_contents())
 }
 
 #[cfg(test)]
@@ -418,5 +431,29 @@ mod tests {
             .err()
             .expect("Multi-cert PEM must be rejected as Root CA");
         assert_eq!(err, SignerError::MultipleCertificatesInCaPem(2));
+    }
+
+    #[test]
+    fn test_ca_signer_rejects_mismatched_ca_key() {
+        let (ca_cert_a, _) = generate_test_ca();
+        let (_, ca_key_b) = generate_test_ca();
+        let err = CaSigner::from_pem(&ca_cert_a, &ca_key_b)
+            .err()
+            .expect("Mismatched CA key must be rejected");
+        assert_eq!(err, SignerError::CaKeyMismatch);
+    }
+
+    #[test]
+    fn test_compute_ca_fingerprint_rejects_multi_cert_and_non_cert() {
+        let (ca_cert_pem, ca_key_pem) = generate_test_ca();
+        let fullchain = format!("{}\n{}", ca_cert_pem, ca_cert_pem);
+        assert_eq!(
+            CaSigner::compute_ca_fingerprint(&fullchain).unwrap_err(),
+            SignerError::MultipleCertificatesInCaPem(2)
+        );
+        assert!(matches!(
+            CaSigner::compute_ca_fingerprint(&ca_key_pem).unwrap_err(),
+            SignerError::CaCertParseError(_)
+        ));
     }
 }

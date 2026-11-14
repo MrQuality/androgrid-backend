@@ -16,14 +16,14 @@ services:
     environment:
       - ANDROGRID_LISTEN_ADDR=0.0.0.0:50051
       - ANDROGRID_CA_CERT_PATH=/etc/androgrid/pki/ca.crt
-      - ANDROGRID_CA_KEY_PATH=/etc/androgrid/pki/ca.key
       - ANDROGRID_SERVER_CERT_PATH=/etc/androgrid/pki/server.crt
       - ANDROGRID_SERVER_KEY_PATH=/etc/androgrid/pki/server.key
+      - ANDROGRID_ALLOW_PAIRING=false
       - ANDROGRID_HEARTBEAT_SECS=2
       - ANDROGRID_LEASE_TIMEOUT_SECS=10
       - RUST_LOG=info
     volumes:
-      - ./pki:/etc/androgrid/pki:ro
+      - ./pki/runtime:/etc/androgrid/pki:ro
     healthcheck:
       test: ["CMD-SHELL", "nc -z 127.0.0.1 50051 || exit 1"]
       interval: 10s
@@ -41,6 +41,6 @@ services:
     volumes:
       - ./ingress/cloudflared.yml:/etc/cloudflared/config.yml:ro
       - ./credentials.json:/etc/cloudflared/credentials.json:ro
-      - ./pki/ca.crt:/etc/cloudflared/ca.crt:ro
+      - ./pki/runtime/ca.crt:/etc/cloudflared/ca.crt:ro
     depends_on:
       - orchestrator

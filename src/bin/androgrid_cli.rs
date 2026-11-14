@@ -5,7 +5,8 @@
 //!
 //! Traces to: AG-SPEC-2026-V2, [REQ-OP-001], [REQ-OP-004], [INV-002], [NFR-SEC-001], [NFR-PERF-001]
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -608,7 +609,9 @@ async fn run_top(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let ca_cert_from_cli = matches.value_source("ca_cert") == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches)?;
 
     if let Commands::Pack {
         wasm,
@@ -702,7 +705,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if let Commands::Cert { action } = cli.command {
-        return handle_cert_command(action, cli.ca_cert.as_deref(), &cli.format);
+        return handle_cert_command(
+            action,
+            cli.ca_cert.as_deref(),
+            ca_cert_from_cli,
+            &cli.format,
+        );
     }
 
     let channel = create_channel(
@@ -1066,6 +1074,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn handle_cert_command(
     action: CertCommands,
     global_ca_cert: Option<&Path>,
+    ca_cert_from_cli: bool,
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
@@ -1100,7 +1109,8 @@ fn handle_cert_command(
                     days,
                     force,
                 } => {
-                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
                     let summary = cert_issue_server(&PkiIssueServerConfig {
                         ca_source,
                         out_dir: out,
@@ -1123,7 +1133,8 @@ fn handle_cert_command(
                     days,
                     force,
                 } => {
-                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
                     let summary = cert_issue_admin(&PkiIssueAdminConfig {
                         ca_source,
                         out_dir: out,
@@ -1143,7 +1154,8 @@ fn handle_cert_command(
                     days,
                     force,
                 } => {
-                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
                     let summary = cert_issue_csr(&PkiIssueCsrConfig {
                         ca_source,
                         csr_path: csr,
@@ -1164,15 +1176,21 @@ fn handle_cert_command(
 fn resolve_ca_source(
     ca_dir: Option<PathBuf>,
     global_ca_cert: Option<&Path>,
+    ca_cert_from_cli: bool,
     ca_key: Option<PathBuf>,
 ) -> Result<CaSource, Box<dyn std::error::Error>> {
     if let Some(key_path) = ca_key {
+        if ca_dir.is_some() {
+            return Err("Cannot combine --ca-dir with --ca-key".into());
+        }
         let cert_path = global_ca_cert
             .ok_or("Explicit --ca-key requires --ca-cert (or ANDROGRID_CA_CERT) to be specified")?;
         Ok(CaSource::Files {
             ca_cert: cert_path.to_path_buf(),
             ca_key: key_path,
         })
+    } else if ca_cert_from_cli {
+        Err("Explicit --ca-cert requires --ca-key (or omit --ca-cert to use --ca-dir)".into())
     } else {
         Ok(CaSource::Dir(
             ca_dir.unwrap_or_else(|| PathBuf::from("./pki")),
@@ -1644,5 +1662,72 @@ mod tests {
         ])
         .expect("cert issue server with explicit CA files should parse");
         assert_eq!(issue_srv.ca_cert, Some(PathBuf::from("/tmp/ca.crt")));
+    }
+
+    #[test]
+    fn test_resolve_ca_source_validation_and_files_execution() {
+        // 1. Explicit CLI --ca-cert without --ca-key must fail
+        let err = resolve_ca_source(None, Some(Path::new("/tmp/ca.crt")), true, None)
+            .expect_err("Explicit --ca-cert without --ca-key must fail");
+        assert!(err.to_string().contains("--ca-key"));
+
+        // 2. Env-sourced ANDROGRID_CA_CERT without --ca-key still allows --ca-dir
+        let dir_src = resolve_ca_source(
+            Some(PathBuf::from("/tmp/pki")),
+            Some(Path::new("/env/ca.crt")),
+            false,
+            None,
+        )
+        .expect("Env CA cert must not break --ca-dir");
+        assert!(matches!(dir_src, CaSource::Dir(p) if p == PathBuf::from("/tmp/pki")));
+
+        // 3. Combining --ca-dir and --ca-key must fail
+        let conflict = resolve_ca_source(
+            Some(PathBuf::from("/tmp/pki")),
+            Some(Path::new("/tmp/ca.crt")),
+            true,
+            Some(PathBuf::from("/tmp/ca.key")),
+        )
+        .expect_err("Combining --ca-dir and --ca-key must fail");
+        assert!(conflict.to_string().contains("Cannot combine"));
+
+        // 4. Execute CaSource::Files end-to-end
+        let root = std::env::temp_dir().join(format!(
+            "androgrid_cli_ca_files_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        cert_init(&PkiInitConfig {
+            out_dir: root.clone(),
+            extra_sans: vec![],
+            no_default_sans: false,
+            ca_days: 365,
+            days: 30,
+            admin_cn: "operator".to_string(),
+            force: false,
+        })
+        .unwrap();
+
+        let files_src = resolve_ca_source(
+            None,
+            Some(&root.join("runtime/ca.crt")),
+            true,
+            Some(root.join("operator/ca.key")),
+        )
+        .unwrap();
+        let rotated = root.join("rotated_files");
+        let summary = cert_issue_server(&PkiIssueServerConfig {
+            ca_source: files_src,
+            out_dir: rotated.clone(),
+            extra_sans: vec!["files.androgrid.test".to_string()],
+            no_default_sans: true,
+            days: 60,
+            force: false,
+        })
+        .expect("cert_issue_server with CaSource::Files must succeed");
+        assert_eq!(summary.sans, vec!["files.androgrid.test"]);
+        assert!(rotated.join("server.crt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

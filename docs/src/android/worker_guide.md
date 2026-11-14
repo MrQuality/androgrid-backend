@@ -61,7 +61,7 @@ openssl ecparam -name prime256v1 -genkey -noout -out client_node_pixel_7_01.key
 # 2. Create a Certificate Signing Request (CSR) specifying the device identity:
 openssl req -new -key client_node_pixel_7_01.key \
   -out client_node_pixel_7_01.csr \
-  -subj "/CN=node_pixel_7_01/O=AndroGrid Cluster/OU=Mobile Worker"
+  -subj "/CN=node_pixel_7_01/O=AndroGrid Worker/OU=Edge Compute"
 
 # 3. Sign the CSR with the cluster Root CA (valid for 365 days):
 openssl x509 -req -in client_node_pixel_7_01.csr \
@@ -171,8 +171,8 @@ Once started:
    ./target/release/androgrid-cli \
      --endpoint https://127.0.0.1:50051 \
      --ca-cert ./deploy/pki/ca.crt \
-     --client-cert ./deploy/pki/client.crt \
-     --client-key ./deploy/pki/client.key \
+     --client-cert ./deploy/pki/admin.crt \
+     --client-key ./deploy/pki/admin.key \
      nodes
    ```
 4. Your Android device will appear in the active worker node inventory!

@@ -24,12 +24,98 @@ pub enum QrError {
     ImageSave { path: String, detail: String },
 }
 
+/// Strips URI scheme prefixes (case-insensitive `https://`, `http://`, `grpcs://`, `grpc://`)
+/// and any trailing path/slashes from an endpoint string so mobile gRPC channel builders
+/// receive a canonical `host[:port]` target.
+///
+/// Traces to: [REQ-OP-001], [INV-002]
+pub fn strip_uri_scheme(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    let without_scheme = if let Some((scheme, rest)) = trimmed.split_once("://") {
+        if matches!(
+            scheme.to_ascii_lowercase().as_str(),
+            "https" | "http" | "grpcs" | "grpc"
+        ) {
+            rest
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let authority = without_scheme
+        .split_once('/')
+        .map(|(auth, _)| auth)
+        .unwrap_or(without_scheme);
+    authority.trim_end_matches('/').to_string()
+}
+
+/// Normalizes a cluster endpoint into canonical `host:port` form for mobile QR payloads.
+///
+/// - Strips URI schemes (`http://`, `https://`, `grpc://`, `grpcs://`, case-insensitive) and paths.
+/// - Rejects unspecified bind addresses (`0.0.0.0`, `::`, `[::]`) that mobile workers cannot route to.
+/// - Appends `:{default_port}` when no port is present.
+///
+/// Traces to: [REQ-OP-001], [INV-002]
+pub fn normalize_cluster_endpoint(endpoint: &str, default_port: u16) -> Result<String, String> {
+    let authority = strip_uri_scheme(endpoint);
+    if authority.is_empty() {
+        return Err("Cluster endpoint cannot be empty".to_string());
+    }
+
+    let (host, has_port) = if authority.starts_with('[') {
+        if let Some(end_bracket) = authority.find(']') {
+            let host_part = &authority[..=end_bracket];
+            let rest = &authority[end_bracket + 1..];
+            let has_port = if rest.is_empty() {
+                false
+            } else if let Some(port_part) = rest.strip_prefix(':') {
+                if port_part.parse::<u16>().is_ok_and(|p| p > 0) {
+                    true
+                } else {
+                    return Err(format!("Invalid port in endpoint '{authority}'"));
+                }
+            } else {
+                return Err(format!("Invalid port in endpoint '{authority}'"));
+            };
+            (host_part, has_port)
+        } else {
+            return Err(format!("Malformed IPv6 endpoint '{authority}'"));
+        }
+    } else if let Some((host_part, port_part)) = authority.rsplit_once(':') {
+        if !host_part.contains(':') && port_part.parse::<u16>().is_ok_and(|p| p > 0) {
+            (host_part, true)
+        } else if authority.contains(':') && host_part.contains(':') {
+            // Unbracketed IPv6 literal without port
+            (authority.as_str(), false)
+        } else {
+            return Err(format!("Invalid port in endpoint '{authority}'"));
+        }
+    } else {
+        (authority.as_str(), false)
+    };
+
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        return Err(format!(
+            "Cluster endpoint '{authority}' uses an unspecified bind address; pass --san <LAN_IP_OR_HOST:PORT>"
+        ));
+    }
+
+    if has_port {
+        Ok(authority)
+    } else if host.contains(':') && !host.starts_with('[') {
+        Ok(format!("[{host}]:{default_port}"))
+    } else {
+        Ok(format!("{host}:{default_port}"))
+    }
+}
+
 /// Compact device pairing payload scanned by the Android worker.
 ///
 /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingPayload {
-    /// Control plane gRPC / HTTP enrollment endpoint URL.
+    /// Control plane gRPC enrollment endpoint in canonical `host:port` format (no URI scheme).
     pub cluster_endpoint: String,
 
     /// Lowercase hexadecimal SHA-256 fingerprint of the cluster Root CA certificate.
@@ -47,9 +133,17 @@ pub struct PairingPayload {
 }
 
 impl PairingPayload {
-    /// Serializes the pairing payload to a compact JSON string.
+    /// Serializes the pairing payload to a compact JSON string, normalizing `cluster_endpoint`
+    /// to canonical `host:port` format without URI scheme prefixes.
     pub fn to_compact_json(&self) -> Result<String, QrError> {
-        serde_json::to_string(self).map_err(|e| QrError::Serialization(e.to_string()))
+        let normalized = PairingPayload {
+            cluster_endpoint: strip_uri_scheme(&self.cluster_endpoint),
+            ca_fingerprint: self.ca_fingerprint.clone(),
+            pairing_token: self.pairing_token.clone(),
+            node_id: self.node_id.clone(),
+            expires_at_epoch_s: self.expires_at_epoch_s,
+        };
+        serde_json::to_string(&normalized).map_err(|e| QrError::Serialization(e.to_string()))
     }
 
     /// Deserializes a pairing payload from a JSON string.
@@ -117,7 +211,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pairing_payload_json_round_trip() {
+    fn test_pairing_payload_json_round_trip_strips_uri_scheme() {
         let payload = PairingPayload {
             cluster_endpoint: "https://192.168.1.50:50051".to_string(),
             ca_fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -131,12 +225,31 @@ mod tests {
             .to_compact_json()
             .expect("Serialization must succeed");
         assert!(json.contains("cluster_endpoint"));
+        assert!(!json.contains("https://"));
+        assert!(json.contains("192.168.1.50:50051"));
         assert!(json.contains("ca_fingerprint"));
         assert!(json.contains("pairing_token"));
         assert!(json.contains("worker-node-alpha"));
 
         let deserialized = PairingPayload::from_json(&json).expect("Deserialization must succeed");
-        assert_eq!(payload, deserialized);
+        assert_eq!(deserialized.cluster_endpoint, "192.168.1.50:50051");
+        assert_eq!(deserialized.pairing_token, payload.pairing_token);
+    }
+
+    #[test]
+    fn test_strip_uri_scheme_normalizes_endpoints() {
+        assert_eq!(
+            strip_uri_scheme("https://10.0.2.2:50051/"),
+            "10.0.2.2:50051"
+        );
+        assert_eq!(
+            strip_uri_scheme("http://127.0.0.1:50051"),
+            "127.0.0.1:50051"
+        );
+        assert_eq!(
+            strip_uri_scheme("  192.168.1.10:50051  "),
+            "192.168.1.10:50051"
+        );
     }
 
     #[test]
@@ -166,5 +279,26 @@ mod tests {
         assert_eq!(&bytes[..4], &[0x89, 0x50, 0x4E, 0x47]);
 
         let _ = std::fs::remove_file(&png_path);
+    }
+
+    #[test]
+    fn test_normalize_cluster_endpoint() {
+        assert_eq!(
+            normalize_cluster_endpoint("HTTPS://192.168.1.50:50051/enroll", 50051).unwrap(),
+            "192.168.1.50:50051"
+        );
+        assert_eq!(
+            normalize_cluster_endpoint("grpc.androgrid.internal", 50051).unwrap(),
+            "grpc.androgrid.internal:50051"
+        );
+        assert_eq!(
+            normalize_cluster_endpoint("[::1]", 50051).unwrap(),
+            "[::1]:50051"
+        );
+        assert!(normalize_cluster_endpoint("0.0.0.0:50051", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::]:50051", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::1]:badport", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::1]:0", 50051).is_err());
+        assert!(normalize_cluster_endpoint("127.0.0.1:0", 50051).is_err());
     }
 }

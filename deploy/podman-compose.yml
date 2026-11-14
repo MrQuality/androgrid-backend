@@ -13,11 +13,13 @@ services:
       dockerfile: Containerfile
     container_name: androgrid-orchestrator
     restart: unless-stopped
+    userns_mode: "keep-id:uid=10001,gid=10001"
     ports:
       - "50051:50051"
     environment:
       - ANDROGRID_LISTEN_ADDR=0.0.0.0:50051
       - ANDROGRID_CA_CERT_PATH=/etc/androgrid/pki/ca.crt
+      - ANDROGRID_CA_KEY_PATH=/etc/androgrid/pki/ca.key
       - ANDROGRID_SERVER_CERT_PATH=/etc/androgrid/pki/server.crt
       - ANDROGRID_SERVER_KEY_PATH=/etc/androgrid/pki/server.key
       - ANDROGRID_HEARTBEAT_SECS=2

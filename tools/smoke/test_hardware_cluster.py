@@ -269,6 +269,8 @@ class PkiManager:
             "client_cert": self.pki_dir / "client.crt",
             "client_key": self.pki_dir / "client.key",
             "client_p12": self.pki_dir / "client.p12",
+            "admin_cert": self.pki_dir / "admin.crt",
+            "admin_key": self.pki_dir / "admin.key",
             "untrusted_cert": self.pki_dir / "untrusted_client.crt",
             "untrusted_key": self.pki_dir / "untrusted_client.key",
         }
@@ -300,15 +302,17 @@ class PkiManager:
         p = self.get_paths()
         # 1. Root CA
         if not p["ca_key"].exists():
-            subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["ca_key"])], check=True)
+            subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["ca_key"])], check=True)
             subprocess.run([
                 "openssl", "req", "-new", "-x509", "-sha256", "-key", str(p["ca_key"]),
                 "-out", str(p["ca_cert"]), "-days", "365",
-                "-subj", "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure"
+                "-subj", "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign",
             ], check=True)
 
         # 2. Server Key & Cert
-        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["server_key"])], check=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["server_key"])], check=True)
         server_csr = self.pki_dir / "server.csr"
         subprocess.run([
             "openssl", "req", "-new", "-key", str(p["server_key"]),
@@ -319,7 +323,7 @@ class PkiManager:
         ext_cnf = self.pki_dir / "server_ext.cnf"
         san_lines = [
             "basicConstraints = CA:FALSE\n",
-            "keyUsage = digitalSignature, keyEncipherment\n",
+            "keyUsage = digitalSignature\n",
             "extendedKeyUsage = serverAuth\n",
             "subjectAltName = @alt_names\n\n",
             "[alt_names]\n",
@@ -340,11 +344,12 @@ class PkiManager:
             "-out", str(p["server_cert"]), "-days", "365", "-sha256",
             "-extfile", str(ext_cnf)
         ], check=True)
+        p["server_cert"].write_text(p["server_cert"].read_text() + p["ca_cert"].read_text())
         server_csr.unlink(missing_ok=True)
         ext_cnf.unlink(missing_ok=True)
 
         # 3. Client Key & Cert
-        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["client_key"])], check=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["client_key"])], check=True)
         client_csr = self.pki_dir / "client.csr"
         subprocess.run([
             "openssl", "req", "-new", "-key", str(p["client_key"]),
@@ -353,7 +358,7 @@ class PkiManager:
         ], check=True)
 
         client_ext = self.pki_dir / "client_ext.cnf"
-        client_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature, keyEncipherment\nextendedKeyUsage = clientAuth\n")
+        client_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n")
         subprocess.run([
             "openssl", "x509", "-req", "-in", str(client_csr),
             "-CA", str(p["ca_cert"]), "-CAkey", str(p["ca_key"]), "-CAcreateserial",
@@ -362,6 +367,25 @@ class PkiManager:
         ], check=True)
         client_csr.unlink(missing_ok=True)
         client_ext.unlink(missing_ok=True)
+
+        # 3b. Operator Admin Key & Cert (OU=Control Plane)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["admin_key"])], check=True)
+        admin_csr = self.pki_dir / "admin.csr"
+        subprocess.run([
+            "openssl", "req", "-new", "-key", str(p["admin_key"]),
+            "-out", str(admin_csr),
+            "-subj", "/CN=operator/O=AndroGrid Cluster/OU=Control Plane"
+        ], check=True)
+        admin_ext = self.pki_dir / "admin_ext.cnf"
+        admin_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n")
+        subprocess.run([
+            "openssl", "x509", "-req", "-in", str(admin_csr),
+            "-CA", str(p["ca_cert"]), "-CAkey", str(p["ca_key"]), "-CAcreateserial",
+            "-out", str(p["admin_cert"]), "-days", "365", "-sha256",
+            "-extfile", str(admin_ext)
+        ], check=True)
+        admin_csr.unlink(missing_ok=True)
+        admin_ext.unlink(missing_ok=True)
 
         # 4. Rogue Untrusted Client for [INV-002] Verification
         untrusted_ca_key = self.pki_dir / "untrusted_ca.key"
@@ -402,10 +426,11 @@ class OrchestratorProcess:
     def start(self):
         """Starts orchestrator service process."""
         env = os.environ.copy()
-        env["ANDROGRID_PORT"] = str(self.port)
-        env["ANDROGRID_CA_CERT"] = str(self.pki_paths["ca_cert"])
-        env["ANDROGRID_SERVER_CERT"] = str(self.pki_paths["server_cert"])
-        env["ANDROGRID_SERVER_KEY"] = str(self.pki_paths["server_key"])
+        env["ANDROGRID_LISTEN_ADDR"] = f"127.0.0.1:{self.port}"
+        env["ANDROGRID_CA_CERT_PATH"] = str(self.pki_paths["ca_cert"])
+        env["ANDROGRID_CA_KEY_PATH"] = str(self.pki_paths["ca_key"])
+        env["ANDROGRID_SERVER_CERT_PATH"] = str(self.pki_paths["server_cert"])
+        env["ANDROGRID_SERVER_KEY_PATH"] = str(self.pki_paths["server_key"])
 
         if self.mode == "cargo":
             if self.bin_path and self.bin_path.exists():
@@ -696,8 +721,8 @@ class SmokeTestRunner:
                 res = self.execute_cli([
                     "--endpoint", f"https://127.0.0.1:{self.config.port}",
                     "--ca-cert", str(paths["ca_cert"]),
-                    "--client-cert", str(paths["client_cert"]),
-                    "--client-key", str(paths["client_key"]),
+                    "--client-cert", str(paths["admin_cert"]),
+                    "--client-key", str(paths["admin_key"]),
                     "nodes"
                 ])
                 if res.returncode == 0 and ("node_" in res.stdout or "worker" in res.stdout):
@@ -721,8 +746,8 @@ class SmokeTestRunner:
             submit_res = self.execute_cli([
                 "--endpoint", f"https://127.0.0.1:{self.config.port}",
                 "--ca-cert", str(paths["ca_cert"]),
-                "--client-cert", str(paths["client_cert"]),
-                "--client-key", str(paths["client_key"]),
+                "--client-cert", str(paths["admin_cert"]),
+                "--client-key", str(paths["admin_key"]),
                 "submit",
                 "--task-id", task_id,
                 "--wasm", str(wasm_file)
@@ -735,8 +760,8 @@ class SmokeTestRunner:
             task_summary = self.poll_task_completion(
                 task_id=task_id,
                 ca_cert=paths["ca_cert"],
-                client_cert=paths["client_cert"],
-                client_key=paths["client_key"]
+                client_cert=paths["admin_cert"],
+                client_key=paths["admin_key"]
             )
             print(f"[+] Task finished with state: {task_summary.state}, exit code: {task_summary.exit_code}")
 

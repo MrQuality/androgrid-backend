@@ -9,6 +9,7 @@ use tonic::{Request, Response, Status};
 
 use crate::proto::androgrid::v1::andro_grid_service_server::AndroGridService;
 use crate::scheduler::ClusterScheduler;
+use crate::transport::tls::AuthenticatedPeer;
 use crate::validate_frame_bound;
 use crate::{
     ClaimCellularTaskRequest, ClaimCellularTaskResponse, RegisterNodeRequest, RegisterNodeResponse,
@@ -43,6 +44,24 @@ impl AndroGridServiceImpl {
             .unwrap_or_default()
             .as_millis() as u64
     }
+
+    /// Enforces that when mTLS client identity metadata is attached, the leaf
+    /// certificate's Subject Common Name matches the claimed `node_id`.
+    fn verify_peer_identity<T>(request: &Request<T>, claimed_node_id: &str) -> Result<(), Status> {
+        if let Some(peer) = request.extensions().get::<AuthenticatedPeer>() {
+            match peer.common_name.as_deref() {
+                Some(cn) if cn == claimed_node_id => Ok(()),
+                Some(cn) => Err(Status::permission_denied(format!(
+                    "mTLS identity mismatch: certificate CN '{cn}' cannot act as node '{claimed_node_id}'"
+                ))),
+                None => Err(Status::permission_denied(
+                    "mTLS client certificate is missing Subject Common Name (CN)",
+                )),
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -54,6 +73,8 @@ impl AndroGridService for AndroGridServiceImpl {
         &self,
         request: Request<RegisterNodeRequest>,
     ) -> Result<Response<RegisterNodeResponse>, Status> {
+        let req_node_id = request.get_ref().node_id.clone();
+        Self::verify_peer_identity(&request, &req_node_id)?;
         let req = request.into_inner();
         let capabilities = req
             .capabilities
@@ -74,6 +95,7 @@ impl AndroGridService for AndroGridServiceImpl {
         &self,
         request: Request<SyncNodeStateRequest>,
     ) -> Result<Response<SyncNodeStateResponse>, Status> {
+        Self::verify_peer_identity(&request, &request.get_ref().node_id)?;
         let req = request.into_inner();
         let now_ms = Self::now_epoch_ms();
 
@@ -94,6 +116,7 @@ impl AndroGridService for AndroGridServiceImpl {
         &self,
         request: Request<ClaimCellularTaskRequest>,
     ) -> Result<Response<ClaimCellularTaskResponse>, Status> {
+        Self::verify_peer_identity(&request, &request.get_ref().node_id)?;
         let req = request.into_inner();
         let now_s = Self::now_epoch_s();
 
@@ -116,6 +139,7 @@ impl AndroGridService for AndroGridServiceImpl {
         &self,
         request: Request<SubmitCellularResultRequest>,
     ) -> Result<Response<SubmitCellularResultResponse>, Status> {
+        Self::verify_peer_identity(&request, &request.get_ref().node_id)?;
         let req = request.into_inner();
 
         // Enforce frame payload bounds [NFR-PERF-001] on execution artifacts

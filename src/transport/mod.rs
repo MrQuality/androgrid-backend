@@ -9,4 +9,7 @@ pub mod tls;
 
 pub use admin_service::AdminServiceImpl;
 pub use service::AndroGridServiceImpl;
-pub use tls::{build_client_mtls_config, build_server_mtls_config};
+pub use tls::{
+    build_client_mtls_config, build_server_bootstrap_tls_config, build_server_mtls_config,
+    require_client_mtls_interceptor,
+};

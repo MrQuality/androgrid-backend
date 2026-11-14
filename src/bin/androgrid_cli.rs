@@ -350,6 +350,28 @@ async fn create_channel(
     Ok(channel)
 }
 
+/// Extracts a fallback `--san` `host:port` from a CLI `--endpoint` URL when the endpoint
+/// targets a non-loopback, routable address. Loopback and unspecified addresses return `""`.
+fn default_san_from_endpoint(endpoint: &str) -> String {
+    let stripped = androgrid_backend::pairing::strip_uri_scheme(endpoint);
+    let host = if let Some(rest) = stripped.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else if stripped.matches(':').count() == 1 {
+        stripped.split(':').next().unwrap_or("")
+    } else {
+        stripped.as_str()
+    };
+
+    if matches!(
+        host,
+        "" | "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "::"
+    ) {
+        String::new()
+    } else {
+        stripped
+    }
+}
+
 /// Runs the interactive terminal observability UI event loop.
 ///
 /// Traces to: [INV-004], [INV-005], [NFR-REL-001]
@@ -407,7 +429,7 @@ async fn run_top(
                                 .generate_pairing_token(GeneratePairingTokenRequest {
                                     node_id: String::new(),
                                     expires_in_seconds: 300,
-                                    san: String::new(),
+                                    san: default_san_from_endpoint(endpoint),
                                 })
                                 .await
                             {
@@ -819,11 +841,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             san,
             output_png,
         } => {
+            let effective_san = san.unwrap_or_else(|| default_san_from_endpoint(&cli.endpoint));
             let res = client
                 .generate_pairing_token(GeneratePairingTokenRequest {
                     node_id: node_id.unwrap_or_default(),
                     expires_in_seconds: expires_in,
-                    san: san.unwrap_or_default(),
+                    san: effective_san,
                 })
                 .await?
                 .into_inner();
@@ -1147,6 +1170,23 @@ mod tests {
     #[test]
     fn test_print_banner_does_not_panic() {
         print_banner();
+    }
+
+    #[test]
+    fn test_default_san_from_endpoint() {
+        assert_eq!(default_san_from_endpoint("https://127.0.0.1:50051"), "");
+        assert_eq!(default_san_from_endpoint("https://localhost:50051"), "");
+        assert_eq!(default_san_from_endpoint("https://[::1]:50051"), "");
+        assert_eq!(default_san_from_endpoint("::1"), "");
+        assert_eq!(default_san_from_endpoint("https://0.0.0.0:50051"), "");
+        assert_eq!(
+            default_san_from_endpoint("https://192.168.1.50:50051"),
+            "192.168.1.50:50051"
+        );
+        assert_eq!(
+            default_san_from_endpoint("https://[2001:db8::1]:50051"),
+            "[2001:db8::1]:50051"
+        );
     }
 
     #[test]

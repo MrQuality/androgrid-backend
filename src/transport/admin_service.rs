@@ -12,6 +12,7 @@ use crate::admin_service_server::AdminService;
 use crate::artifact::ArtifactStore;
 use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
+use crate::transport::tls::AuthenticatedPeer;
 use crate::{
     CancelTaskRequest, CancelTaskResponse, GeneratePairingTokenRequest,
     GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTasksRequest,
@@ -81,6 +82,19 @@ impl AdminServiceImpl {
             cluster_endpoint,
         }
     }
+
+    /// Enforces a positive allowlist requiring operator certificates
+    /// (`OU = Control Plane`) when mTLS identity metadata is attached.
+    fn authorize_admin_peer<T>(request: &Request<T>) -> Result<(), Status> {
+        if let Some(peer) = request.extensions().get::<AuthenticatedPeer>() {
+            if peer.organizational_unit.as_deref() != Some("Control Plane") {
+                return Err(Status::permission_denied(
+                    "AdminService requires an operator certificate with OU=Control Plane",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -92,6 +106,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<SubmitTaskRequest>,
     ) -> Result<Response<SubmitTaskResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task = req.task.ok_or_else(|| {
             Status::invalid_argument("task field is required in SubmitTaskRequest")
@@ -123,6 +138,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GetTaskStatusRequest>,
     ) -> Result<Response<GetTaskStatusResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task_id = req.task_id;
         if task_id.is_empty() {
@@ -165,8 +181,9 @@ impl AdminService for AdminServiceImpl {
     /// Traces to: [REQ-OP-001]
     async fn list_worker_nodes(
         &self,
-        _request: Request<ListWorkerNodesRequest>,
+        request: Request<ListWorkerNodesRequest>,
     ) -> Result<Response<ListWorkerNodesResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let nodes = self.scheduler.list_worker_nodes();
         Ok(Response::new(ListWorkerNodesResponse { nodes }))
     }
@@ -178,6 +195,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<ListTasksRequest>,
     ) -> Result<Response<ListTasksResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let state_filter = if req.state_filter == 0 {
             None
@@ -195,6 +213,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CancelTaskRequest>,
     ) -> Result<Response<CancelTaskResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task_id = req.task_id;
         if task_id.is_empty() {
@@ -225,6 +244,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<UploadArtifactRequest>,
     ) -> Result<Response<UploadArtifactResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let bytecode = req.bytecode;
         if bytecode.is_empty() {
@@ -260,6 +280,13 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GeneratePairingTokenRequest>,
     ) -> Result<Response<GeneratePairingTokenResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        if self.ca_fingerprint.is_empty() {
+            return Err(Status::failed_precondition(
+                "Root CA signer is not initialized; pairing enrollment is unavailable (check ANDROGRID_CA_KEY_PATH)",
+            ));
+        }
+
         let req = request.into_inner();
         let target_node_id = if req.node_id.trim().is_empty() {
             None
@@ -273,21 +300,25 @@ impl AdminService for AdminServiceImpl {
             None
         };
 
+        let default_port = crate::pairing::strip_uri_scheme(&self.cluster_endpoint)
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok())
+            .filter(|&p| p > 0)
+            .unwrap_or(50051);
+
+        let raw_endpoint = if !req.san.trim().is_empty() {
+            &req.san
+        } else {
+            &self.cluster_endpoint
+        };
+        let cluster_endpoint =
+            crate::pairing::normalize_cluster_endpoint(raw_endpoint, default_port)
+                .map_err(Status::invalid_argument)?;
+
         let record = self
             .token_store
             .generate_token(target_node_id.clone(), ttl)
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
-
-        let cluster_endpoint = if !req.san.trim().is_empty() {
-            let host = req.san.trim();
-            if host.starts_with("http://") || host.starts_with("https://") {
-                host.to_string()
-            } else {
-                format!("https://{host}")
-            }
-        } else {
-            self.cluster_endpoint.clone()
-        };
 
         let payload = PairingPayload {
             cluster_endpoint: cluster_endpoint.clone(),
@@ -456,9 +487,47 @@ mod tests {
         let inner = res.into_inner();
         assert_eq!(inner.node_id, "test-node-pair");
         assert_eq!(inner.ca_fingerprint, "fingerprint_12345");
-        assert_eq!(inner.cluster_endpoint, "https://192.168.1.100:50051");
+        assert_eq!(inner.cluster_endpoint, "192.168.1.100:50051");
         assert_eq!(inner.pairing_token.len(), 64);
         assert!(inner.pairing_payload_json.contains("test-node-pair"));
         assert!(inner.pairing_payload_json.contains(&inner.pairing_token));
+        assert!(!inner.pairing_payload_json.contains("https://"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_pairing_token_strips_uri_scheme_from_san_and_default() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let token_store = Arc::new(PairingTokenStore::default());
+        let service = AdminServiceImpl::with_services(
+            scheduler,
+            artifact_store,
+            "http://127.0.0.1:8080".to_string(),
+            Arc::clone(&token_store),
+            "fp_abc".to_string(),
+            "https://10.0.0.1:50051".to_string(),
+        );
+
+        let res_default = service
+            .generate_pairing_token(Request::new(GeneratePairingTokenRequest {
+                node_id: "node-1".to_string(),
+                expires_in_seconds: 300,
+                san: "".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(res_default.cluster_endpoint, "10.0.0.1:50051");
+
+        let res_san = service
+            .generate_pairing_token(Request::new(GeneratePairingTokenRequest {
+                node_id: "node-2".to_string(),
+                expires_in_seconds: 300,
+                san: "https://192.168.1.42:50051".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(res_san.cluster_endpoint, "192.168.1.42:50051");
     }
 }

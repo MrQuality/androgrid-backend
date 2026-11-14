@@ -41,6 +41,7 @@ dependencies = [
  "ratatui",
  "rcgen",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -52,6 +53,7 @@ dependencies = [
  "tonic-build",
  "tracing",
  "tracing-subscriber",
+ "x509-parser",
 ]
 
 [[package]]

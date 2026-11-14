@@ -15,9 +15,9 @@ use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
 use androgrid_backend::{
-    build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl, ArtifactServer,
-    ArtifactStore, CaSigner, ClusterConfig, ClusterScheduler, EnrollmentContext,
-    EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
+    build_server_bootstrap_tls_config, require_client_mtls_interceptor, AdminServiceImpl,
+    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, ClusterConfig, ClusterScheduler,
+    EnrollmentContext, EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]
@@ -99,11 +99,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (Some(Arc::new(signer)), fp)
                 }
                 Err(e) => {
+                    if config.allow_pairing {
+                        return Err(format!(
+                            "Failed to initialize Root CA signer from {}: {e}. \
+                             Ensure CA private key is PKCS#8 PEM (openssl genpkey) or disable pairing.",
+                            ca_key_path.display()
+                        )
+                        .into());
+                    }
                     warn!(error = %e, "Failed to initialize Root CA signer; enrollment disabled");
                     (None, String::new())
                 }
             },
             (Err(e), _) | (_, Err(e)) => {
+                if config.allow_pairing {
+                    return Err(format!(
+                        "Could not read Root CA cert ({}) or key ({}): {e}",
+                        ca_cert_path.display(),
+                        ca_key_path.display()
+                    )
+                    .into());
+                }
                 warn!(error = %e, "Could not read Root CA cert or key; enrollment disabled");
                 (None, String::new())
             }
@@ -117,12 +133,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         signer: Arc::clone(signer),
     });
 
+    let mtls_enabled = config.is_mtls_configured();
+    let mtls_guard = ConditionalMtlsInterceptor { mtls_enabled };
     let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
-    let service_server = AndroGridServiceServer::new(service)
-        .max_decoding_message_size(config.max_frame_size_bytes)
-        .max_encoding_message_size(config.max_frame_size_bytes);
+    let service_server = tonic::codegen::InterceptedService::new(
+        AndroGridServiceServer::new(service)
+            .max_decoding_message_size(config.max_frame_size_bytes)
+            .max_encoding_message_size(config.max_frame_size_bytes),
+        mtls_guard,
+    );
 
-    let cluster_endpoint = format!("https://{}", config.listen_addr);
+    let cluster_endpoint = config.listen_addr.to_string();
     let admin_service = AdminServiceImpl::with_services(
         Arc::clone(&scheduler),
         Arc::clone(&artifact_store),
@@ -131,9 +152,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ca_fingerprint,
         cluster_endpoint,
     );
-    let admin_server = AdminServiceServer::new(admin_service)
-        .max_decoding_message_size(config.max_frame_size_bytes)
-        .max_encoding_message_size(config.max_frame_size_bytes);
+    let admin_server = tonic::codegen::InterceptedService::new(
+        AdminServiceServer::new(admin_service)
+            .max_decoding_message_size(config.max_frame_size_bytes)
+            .max_encoding_message_size(config.max_frame_size_bytes),
+        mtls_guard,
+    );
 
     let (artifact_shutdown_tx, artifact_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let artifact_listener = tokio::net::TcpListener::bind(config.artifact_listen_addr).await?;
@@ -141,18 +165,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         artifact_addr = %config.artifact_listen_addr,
         "Starting embedded HTTP static artifact, pairing & real-time web dashboard server [NFR-PERF-001], [REQ-OP-001], [INV-004], [INV-005]"
     );
+    let http_enrollment_ctx = if mtls_enabled {
+        info!("mTLS enabled: plaintext HTTP /api/v1/enroll disabled (use gRPC over TLS 1.3)");
+        None
+    } else {
+        enrollment_ctx.clone()
+    };
     ArtifactServer::spawn_full(
         artifact_listener,
         Arc::clone(&artifact_store),
         Arc::clone(&scheduler),
-        enrollment_ctx.clone(),
+        http_enrollment_ctx,
         artifact_shutdown_rx,
     );
 
     let mut server_builder = Server::builder();
 
-    if config.is_mtls_configured() {
-        info!("Enforcing Mutual TLS 1.3 transport security [INV-002], [NFR-SEC-001]");
+    if mtls_enabled {
+        info!("Enforcing TLS 1.3 mTLS with optional bootstrap client auth [REQ-OP-001], [INV-002], [NFR-SEC-001]");
         let ca_path = config.tls_ca_cert_path.as_ref().unwrap();
         let cert_path = config.tls_server_cert_path.as_ref().unwrap();
         let key_path = config.tls_server_key_path.as_ref().unwrap();
@@ -161,7 +191,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let server_cert_pem = tokio::fs::read(cert_path).await?;
         let server_key_pem = tokio::fs::read(key_path).await?;
 
-        let server_tls = build_server_mtls_config(&server_cert_pem, &server_key_pem, &ca_cert_pem);
+        let server_tls =
+            build_server_bootstrap_tls_config(&server_cert_pem, &server_key_pem, &ca_cert_pem);
         server_builder = server_builder.tls_config(server_tls)?;
     } else {
         warn!("mTLS credentials not specified; binding plaintext service [development mode]");
@@ -199,4 +230,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("AndroGrid Control Plane terminated cleanly");
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalMtlsInterceptor {
+    mtls_enabled: bool,
+}
+
+impl tonic::service::Interceptor for ConditionalMtlsInterceptor {
+    #[allow(clippy::result_large_err)]
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        if self.mtls_enabled {
+            require_client_mtls_interceptor(req)
+        } else {
+            Ok(req)
+        }
+    }
 }

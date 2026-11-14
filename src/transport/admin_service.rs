@@ -260,6 +260,12 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GeneratePairingTokenRequest>,
     ) -> Result<Response<GeneratePairingTokenResponse>, Status> {
+        if self.ca_fingerprint.is_empty() {
+            return Err(Status::failed_precondition(
+                "Root CA signer is not initialized; pairing enrollment is unavailable (check ANDROGRID_CA_KEY_PATH)",
+            ));
+        }
+
         let req = request.into_inner();
         let target_node_id = if req.node_id.trim().is_empty() {
             None

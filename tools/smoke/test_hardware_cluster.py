@@ -300,15 +300,17 @@ class PkiManager:
         p = self.get_paths()
         # 1. Root CA
         if not p["ca_key"].exists():
-            subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["ca_key"])], check=True)
+            subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["ca_key"])], check=True)
             subprocess.run([
                 "openssl", "req", "-new", "-x509", "-sha256", "-key", str(p["ca_key"]),
                 "-out", str(p["ca_cert"]), "-days", "365",
-                "-subj", "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure"
+                "-subj", "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure",
+                "-addext", "basicConstraints=critical,CA:TRUE",
+                "-addext", "keyUsage=critical,digitalSignature,keyCertSign,cRLSign",
             ], check=True)
 
         # 2. Server Key & Cert
-        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["server_key"])], check=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["server_key"])], check=True)
         server_csr = self.pki_dir / "server.csr"
         subprocess.run([
             "openssl", "req", "-new", "-key", str(p["server_key"]),
@@ -319,7 +321,7 @@ class PkiManager:
         ext_cnf = self.pki_dir / "server_ext.cnf"
         san_lines = [
             "basicConstraints = CA:FALSE\n",
-            "keyUsage = digitalSignature, keyEncipherment\n",
+            "keyUsage = digitalSignature\n",
             "extendedKeyUsage = serverAuth\n",
             "subjectAltName = @alt_names\n\n",
             "[alt_names]\n",
@@ -340,11 +342,12 @@ class PkiManager:
             "-out", str(p["server_cert"]), "-days", "365", "-sha256",
             "-extfile", str(ext_cnf)
         ], check=True)
+        p["server_cert"].write_text(p["server_cert"].read_text() + p["ca_cert"].read_text())
         server_csr.unlink(missing_ok=True)
         ext_cnf.unlink(missing_ok=True)
 
         # 3. Client Key & Cert
-        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["client_key"])], check=True)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["client_key"])], check=True)
         client_csr = self.pki_dir / "client.csr"
         subprocess.run([
             "openssl", "req", "-new", "-key", str(p["client_key"]),
@@ -353,7 +356,7 @@ class PkiManager:
         ], check=True)
 
         client_ext = self.pki_dir / "client_ext.cnf"
-        client_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature, keyEncipherment\nextendedKeyUsage = clientAuth\n")
+        client_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n")
         subprocess.run([
             "openssl", "x509", "-req", "-in", str(client_csr),
             "-CA", str(p["ca_cert"]), "-CAkey", str(p["ca_key"]), "-CAcreateserial",
@@ -402,10 +405,11 @@ class OrchestratorProcess:
     def start(self):
         """Starts orchestrator service process."""
         env = os.environ.copy()
-        env["ANDROGRID_PORT"] = str(self.port)
-        env["ANDROGRID_CA_CERT"] = str(self.pki_paths["ca_cert"])
-        env["ANDROGRID_SERVER_CERT"] = str(self.pki_paths["server_cert"])
-        env["ANDROGRID_SERVER_KEY"] = str(self.pki_paths["server_key"])
+        env["ANDROGRID_LISTEN_ADDR"] = f"127.0.0.1:{self.port}"
+        env["ANDROGRID_CA_CERT_PATH"] = str(self.pki_paths["ca_cert"])
+        env["ANDROGRID_CA_KEY_PATH"] = str(self.pki_paths["ca_key"])
+        env["ANDROGRID_SERVER_CERT_PATH"] = str(self.pki_paths["server_cert"])
+        env["ANDROGRID_SERVER_KEY_PATH"] = str(self.pki_paths["server_key"])
 
         if self.mode == "cargo":
             if self.bin_path and self.bin_path.exists():

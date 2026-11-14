@@ -149,8 +149,15 @@ impl CaSigner {
             });
         }
 
+        // Sanitize worker certificate Subject DN so CSRs cannot inject privileged OU values.
+        let mut sanitized_dn = rcgen::DistinguishedName::new();
+        sanitized_dn.push(DnType::CommonName, expected_node_id);
+        sanitized_dn.push(DnType::OrganizationName, "AndroGrid Worker");
+        sanitized_dn.push(DnType::OrganizationalUnitName, "Edge Compute");
+        csr_params.params.distinguished_name = sanitized_dn;
+
         // Configure standard worker certificate extensions:
-        // Client authentication only, 365 days validity
+        // Client authentication only, ECDSA digitalSignature only (RFC 5280)
         csr_params
             .params
             .insert_extended_key_usage(ExtendedKeyUsagePurpose::ClientAuth);
@@ -158,10 +165,6 @@ impl CaSigner {
             .params
             .key_usages
             .push(KeyUsagePurpose::DigitalSignature);
-        csr_params
-            .params
-            .key_usages
-            .push(KeyUsagePurpose::KeyEncipherment);
 
         // Sign the CSR using the Root CA
         let signed_cert = csr_params

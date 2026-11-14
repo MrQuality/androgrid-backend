@@ -26,21 +26,23 @@ mkdir -p "${OUTPUT_DIR}"
 
 # 1. Generate Internal Root CA
 if [ ! -f "${OUTPUT_DIR}/ca.key" ]; then
-    echo "[+] Generating Internal Root CA key (prime256v1)..."
-    openssl ecparam -name prime256v1 -genkey -noout -out "${OUTPUT_DIR}/ca.key"
+    echo "[+] Generating Internal Root CA key (P-256 PKCS#8)..."
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${OUTPUT_DIR}/ca.key"
     chmod 600 "${OUTPUT_DIR}/ca.key"
 
     echo "[+] Generating Self-Signed Root CA Certificate..."
     openssl req -new -x509 -sha256 -key "${OUTPUT_DIR}/ca.key" \
         -out "${OUTPUT_DIR}/ca.crt" -days "${DAYS_VALID}" \
-        -subj "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure"
+        -subj "/CN=AndroGrid Internal Root CA/O=AndroGrid Cluster/OU=Infrastructure" \
+        -addext "basicConstraints=critical,CA:TRUE" \
+        -addext "keyUsage=critical,digitalSignature,keyCertSign,cRLSign"
 else
     echo "[*] Existing Root CA found; reusing ${OUTPUT_DIR}/ca.crt"
 fi
 
 # 2. Generate Orchestrator Server Certificate
-echo "[+] Generating Orchestrator Server key (prime256v1)..."
-openssl ecparam -name prime256v1 -genkey -noout -out "${OUTPUT_DIR}/server.key"
+echo "[+] Generating Orchestrator Server key (P-256 PKCS#8)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${OUTPUT_DIR}/server.key"
 chmod 600 "${OUTPUT_DIR}/server.key"
 
 echo "[+] Creating Orchestrator Server CSR..."
@@ -51,7 +53,7 @@ openssl req -new -key "${OUTPUT_DIR}/server.key" \
 echo "[+] Signing Orchestrator Server Certificate with Subject Alternative Names (SAN)..."
 cat > "${OUTPUT_DIR}/server_ext.cnf" <<EOF
 basicConstraints = CA:FALSE
-keyUsage = digitalSignature, keyEncipherment
+keyUsage = digitalSignature
 extendedKeyUsage = serverAuth
 subjectAltName = @alt_names
 
@@ -83,8 +85,8 @@ cat "${OUTPUT_DIR}/ca.crt" >> "${OUTPUT_DIR}/server.crt"
 rm -f "${OUTPUT_DIR}/server.csr" "${OUTPUT_DIR}/server_ext.cnf"
 
 # 3. Generate Android Worker Client Certificate
-echo "[+] Generating Android Worker Client key (prime256v1)..."
-openssl ecparam -name prime256v1 -genkey -noout -out "${OUTPUT_DIR}/client.key"
+echo "[+] Generating Android Worker Client key (P-256 PKCS#8)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${OUTPUT_DIR}/client.key"
 chmod 600 "${OUTPUT_DIR}/client.key"
 
 echo "[+] Creating Android Worker CSR for ${NODE_ID}..."
@@ -94,7 +96,7 @@ openssl req -new -key "${OUTPUT_DIR}/client.key" \
 
 cat > "${OUTPUT_DIR}/client_ext.cnf" <<EOF
 basicConstraints = CA:FALSE
-keyUsage = digitalSignature, keyEncipherment
+keyUsage = digitalSignature
 extendedKeyUsage = clientAuth
 EOF
 
@@ -105,9 +107,34 @@ openssl x509 -req -in "${OUTPUT_DIR}/client.csr" \
 
 rm -f "${OUTPUT_DIR}/client.csr" "${OUTPUT_DIR}/client_ext.cnf"
 
-# 4. Package Android KeyStore PKCS12 Bundle (.p12)
+# 3b. Generate Operator Admin Client Certificate
+echo "[+] Generating Operator Admin Client key (P-256 PKCS#8)..."
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "${OUTPUT_DIR}/admin.key"
+chmod 600 "${OUTPUT_DIR}/admin.key"
+
+openssl req -new -key "${OUTPUT_DIR}/admin.key" \
+    -out "${OUTPUT_DIR}/admin.csr" \
+    -subj "/CN=operator/O=AndroGrid Cluster/OU=Control Plane"
+
+cat > "${OUTPUT_DIR}/admin_ext.cnf" <<EOF
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature
+extendedKeyUsage = clientAuth
+EOF
+
+openssl x509 -req -in "${OUTPUT_DIR}/admin.csr" \
+    -CA "${OUTPUT_DIR}/ca.crt" -CAkey "${OUTPUT_DIR}/ca.key" -CAcreateserial \
+    -out "${OUTPUT_DIR}/admin.crt" -days "${CLIENT_DAYS_VALID}" -sha256 \
+    -extfile "${OUTPUT_DIR}/admin_ext.cnf"
+
+rm -f "${OUTPUT_DIR}/admin.csr" "${OUTPUT_DIR}/admin_ext.cnf"
+
+# 4. Package Android KeyStore PKCS12 Bundle (.p12) with legacy PBE-SHA1-3DES for Android KeyStore compat
 echo "[+] Packaging Android KeyStore PKCS12 (.p12) bundle..."
 openssl pkcs12 -export \
+    -certpbe PBE-SHA1-3DES \
+    -keypbe PBE-SHA1-3DES \
+    -macalg sha1 \
     -in "${OUTPUT_DIR}/client.crt" \
     -inkey "${OUTPUT_DIR}/client.key" \
     -certfile "${OUTPUT_DIR}/ca.crt" \
@@ -139,6 +166,8 @@ echo "Files generated in: ${OUTPUT_DIR}"
 echo "  - ca.crt       : Root CA Public Certificate"
 echo "  - server.crt   : Orchestrator TLS 1.3 Fullchain Certificate (Server + Root CA)"
 echo "  - server.key   : Orchestrator Private Key"
+echo "  - admin.crt    : Operator Admin TLS 1.3 Certificate"
+echo "  - admin.key    : Operator Admin Private Key"
 echo "  - client.crt   : Worker TLS 1.3 Certificate"
 echo "  - client.key   : Worker Private Key"
 echo "  - client.p12   : PKCS12 bundle for Android KeyStore import"

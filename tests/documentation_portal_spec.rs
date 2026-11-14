@@ -149,8 +149,10 @@ fn test_quickstart_enforces_podman_standard_and_detailed_arguments() {
         "Quickstart must provide detailed parameter breakdowns"
     );
     assert!(
-        content.contains("Argument 1") && content.contains("Argument 2"),
-        "Quickstart must explain individual positional arguments"
+        content.contains("androgrid-cli cert init")
+            && content.contains("--out")
+            && content.contains("--san"),
+        "Quickstart must explain androgrid-cli cert init flags"
     );
 }
 

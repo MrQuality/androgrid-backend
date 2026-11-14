@@ -65,10 +65,7 @@ pub enum CaSource {
     /// Directory containing either `runtime/ca.crt` + `operator/ca.key` or flat `ca.crt` + `ca.key`.
     Dir(PathBuf),
     /// Explicit PEM file paths for CA certificate and CA private key.
-    Files {
-        ca_cert: PathBuf,
-        ca_key: PathBuf,
-    },
+    Files { ca_cert: PathBuf, ca_key: PathBuf },
 }
 
 /// Parameters for Day-0 cluster PKI initialization (`cert init`).
@@ -252,7 +249,13 @@ pub fn cert_issue_admin(config: &PkiIssueAdminConfig) -> Result<PkiOperationSumm
     validate_days(config.days, "days")?;
     validate_non_empty_cn(&config.cn, "cn")?;
     let signer = load_ca_signer(&config.ca_source)?;
-    issue_admin_with_signer(&signer, &config.out_dir, &config.cn, config.days, config.force)
+    issue_admin_with_signer(
+        &signer,
+        &config.out_dir,
+        &config.cn,
+        config.days,
+        config.force,
+    )
 }
 
 /// Signs a worker PKCS#10 CSR offline using the same hardened policy as online enrollment.
@@ -581,9 +584,7 @@ fn validate_non_empty_cn(value: &str, flag_name: &str) -> Result<(), PkiError> {
 }
 
 fn validate_node_id(node_id: &str) -> Result<(), PkiError> {
-    if node_id.trim().is_empty()
-        || node_id.chars().any(|c| c.is_whitespace() || c.is_control())
-    {
+    if node_id.trim().is_empty() || node_id.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(PkiError::InvalidArgument(format!(
             "Invalid --node-id '{node_id}': must be non-empty without whitespace or control characters"
         )));
@@ -728,8 +729,16 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            for key_rel in ["runtime/server.key", "operator/ca.key", "operator/admin.key"] {
-                let mode = fs::metadata(dir.join(key_rel)).unwrap().permissions().mode() & 0o777;
+            for key_rel in [
+                "runtime/server.key",
+                "operator/ca.key",
+                "operator/admin.key",
+            ] {
+                let mode = fs::metadata(dir.join(key_rel))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777;
                 assert_eq!(mode, 0o600, "Expected 0600 on {key_rel}");
             }
         }

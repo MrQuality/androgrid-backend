@@ -1089,72 +1089,74 @@ fn handle_cert_command(
             })?;
             print_cert_summary(&summary, format, None)?;
         }
-        CertCommands::Issue { target } => match target {
-            CertIssueCommands::Server {
-                ca_dir,
-                ca_key,
-                out,
-                san,
-                no_default_sans,
-                days,
-                force,
-            } => {
-                let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
-                let summary = cert_issue_server(&PkiIssueServerConfig {
-                    ca_source,
-                    out_dir: out,
-                    extra_sans: san,
+        CertCommands::Issue { target } => {
+            match target {
+                CertIssueCommands::Server {
+                    ca_dir,
+                    ca_key,
+                    out,
+                    san,
                     no_default_sans,
                     days,
                     force,
-                })?;
-                print_cert_summary(
+                } => {
+                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let summary = cert_issue_server(&PkiIssueServerConfig {
+                        ca_source,
+                        out_dir: out,
+                        extra_sans: san,
+                        no_default_sans,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(
                     &summary,
                     format,
                     Some("Restart androgrid-backend to load the rotated server certificate and key."),
                 )?;
-            }
-            CertIssueCommands::Admin {
-                ca_dir,
-                ca_key,
-                out,
-                cn,
-                days,
-                force,
-            } => {
-                let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
-                let summary = cert_issue_admin(&PkiIssueAdminConfig {
-                    ca_source,
-                    out_dir: out,
+                }
+                CertIssueCommands::Admin {
+                    ca_dir,
+                    ca_key,
+                    out,
                     cn,
                     days,
                     force,
-                })?;
-                print_cert_summary(&summary, format, None)?;
-            }
-            CertIssueCommands::Csr {
-                csr,
-                node_id,
-                ca_dir,
-                ca_key,
-                out,
-                ca_out,
-                days,
-                force,
-            } => {
-                let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
-                let summary = cert_issue_csr(&PkiIssueCsrConfig {
-                    ca_source,
-                    csr_path: csr,
+                } => {
+                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let summary = cert_issue_admin(&PkiIssueAdminConfig {
+                        ca_source,
+                        out_dir: out,
+                        cn,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(&summary, format, None)?;
+                }
+                CertIssueCommands::Csr {
+                    csr,
                     node_id,
-                    out_path: out,
-                    ca_out_path: ca_out,
+                    ca_dir,
+                    ca_key,
+                    out,
+                    ca_out,
                     days,
                     force,
-                })?;
-                print_cert_summary(&summary, format, None)?;
+                } => {
+                    let ca_source = resolve_ca_source(ca_dir, global_ca_cert, ca_key)?;
+                    let summary = cert_issue_csr(&PkiIssueCsrConfig {
+                        ca_source,
+                        csr_path: csr,
+                        node_id,
+                        out_path: out,
+                        ca_out_path: ca_out,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(&summary, format, None)?;
+                }
             }
-        },
+        }
     }
     Ok(())
 }
@@ -1165,9 +1167,8 @@ fn resolve_ca_source(
     ca_key: Option<PathBuf>,
 ) -> Result<CaSource, Box<dyn std::error::Error>> {
     if let Some(key_path) = ca_key {
-        let cert_path = global_ca_cert.ok_or(
-            "Explicit --ca-key requires --ca-cert (or ANDROGRID_CA_CERT) to be specified",
-        )?;
+        let cert_path = global_ca_cert
+            .ok_or("Explicit --ca-key requires --ca-cert (or ANDROGRID_CA_CERT) to be specified")?;
         Ok(CaSource::Files {
             ca_cert: cert_path.to_path_buf(),
             ca_key: key_path,

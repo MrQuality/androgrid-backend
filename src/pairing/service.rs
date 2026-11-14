@@ -15,8 +15,8 @@ use std::sync::Arc;
 use tonic::{Request, Response as TonicResponse, Status};
 use tracing::{error, info, warn};
 
-use crate::pairing::signer::CaSigner;
-use crate::pairing::token::{PairingError, PairingTokenStore};
+use crate::pairing::signer::{CaSigner, SignedWorkerCert, SignerError};
+use crate::pairing::token::{PairingError, PairingTokenStore, RedeemActionError};
 use crate::proto::androgrid::v1::enrollment_service_server::EnrollmentService;
 use crate::proto::androgrid::v1::{EnrollWorkerRequest, EnrollWorkerResponse};
 
@@ -57,6 +57,43 @@ pub struct HttpEnrollResponse {
 pub struct EnrollmentContext {
     pub token_store: Arc<PairingTokenStore>,
     pub signer: Arc<CaSigner>,
+}
+
+/// Unified enrollment error distinguishing token/rate-limit errors from CSR signing errors.
+pub enum EnrollFailure {
+    Pairing(PairingError),
+    Signer(SignerError),
+}
+
+impl std::fmt::Display for EnrollFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EnrollFailure::Pairing(e) => e.fmt(f),
+            EnrollFailure::Signer(e) => e.fmt(f),
+        }
+    }
+}
+
+impl EnrollmentContext {
+    /// Atomically validates the pairing token, signs the worker CSR, and marks
+    /// the token as redeemed only after certificate issuance succeeds.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn redeem_and_sign(
+        &self,
+        token: &str,
+        node_id: &str,
+        csr_pem: &str,
+    ) -> Result<SignedWorkerCert, EnrollFailure> {
+        self.token_store
+            .redeem_with(token, node_id, |_| {
+                self.signer.sign_worker_csr(csr_pem, node_id)
+            })
+            .map_err(|err| match err {
+                RedeemActionError::Pairing(e) => EnrollFailure::Pairing(e),
+                RedeemActionError::Action(e) => EnrollFailure::Signer(e),
+            })
+    }
 }
 
 /// Tonic gRPC implementation of the EnrollmentService.
@@ -118,19 +155,7 @@ impl EnrollmentService for EnrollmentServiceImpl {
 
         info!(node_id = %node_id, "Processing gRPC worker enrollment request [REQ-OP-001]");
 
-        // Step 1: Validate and redeem pairing token (enforcing single-use semantics)
-        if let Err(e) = self.context.token_store.redeem_token(token, node_id) {
-            warn!(node_id = %node_id, error = %e, "Enrollment token redemption rejected");
-            return Ok(TonicResponse::new(EnrollWorkerResponse {
-                success: false,
-                client_cert_pem: String::new(),
-                ca_cert_pem: String::new(),
-                error_message: e.to_string(),
-            }));
-        }
-
-        // Step 2: Validate CSR and sign client certificate with Root CA
-        match self.context.signer.sign_worker_csr(csr_pem, node_id) {
+        match self.context.redeem_and_sign(token, node_id, csr_pem) {
             Ok(signed) => {
                 info!(node_id = %node_id, "Successfully issued mTLS client certificate [INV-002]");
                 Ok(TonicResponse::new(EnrollWorkerResponse {
@@ -140,7 +165,16 @@ impl EnrollmentService for EnrollmentServiceImpl {
                     error_message: String::new(),
                 }))
             }
-            Err(e) => {
+            Err(EnrollFailure::Pairing(e)) => {
+                warn!(node_id = %node_id, error = %e, "Enrollment token redemption rejected");
+                Ok(TonicResponse::new(EnrollWorkerResponse {
+                    success: false,
+                    client_cert_pem: String::new(),
+                    ca_cert_pem: String::new(),
+                    error_message: e.to_string(),
+                }))
+            }
+            Err(EnrollFailure::Signer(e)) => {
                 error!(node_id = %node_id, error = %e, "Failed to sign worker CSR");
                 Ok(TonicResponse::new(EnrollWorkerResponse {
                     success: false,
@@ -188,31 +222,7 @@ async fn handle_http_enroll(
 
     info!(node_id = %node_id, "Processing HTTP worker enrollment request [REQ-OP-001]");
 
-    // Step 1: Validate and redeem pairing token
-    if let Err(e) = context.token_store.redeem_token(token, node_id) {
-        warn!(node_id = %node_id, error = %e, "HTTP enrollment token redemption rejected");
-        let status = match e {
-            PairingError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
-            PairingError::TokenExpired { .. } => StatusCode::GONE,
-            PairingError::TokenAlreadyRedeemed => StatusCode::CONFLICT,
-            PairingError::PairingDisabled => StatusCode::FORBIDDEN,
-            _ => StatusCode::UNAUTHORIZED,
-        };
-
-        return (
-            status,
-            Json(HttpEnrollResponse {
-                success: false,
-                client_cert_pem: String::new(),
-                ca_cert_pem: String::new(),
-                error_message: e.to_string(),
-            }),
-        )
-            .into_response();
-    }
-
-    // Step 2: Validate CSR and sign client certificate with Root CA
-    match context.signer.sign_worker_csr(csr_pem, node_id) {
+    match context.redeem_and_sign(token, node_id, csr_pem) {
         Ok(signed) => {
             info!(node_id = %node_id, "Successfully issued mTLS client certificate via HTTP [INV-002]");
             (
@@ -226,7 +236,28 @@ async fn handle_http_enroll(
             )
                 .into_response()
         }
-        Err(e) => {
+        Err(EnrollFailure::Pairing(e)) => {
+            warn!(node_id = %node_id, error = %e, "HTTP enrollment token redemption rejected");
+            let status = match e {
+                PairingError::RateLimitExceeded => StatusCode::TOO_MANY_REQUESTS,
+                PairingError::TokenExpired { .. } => StatusCode::GONE,
+                PairingError::TokenAlreadyRedeemed => StatusCode::CONFLICT,
+                PairingError::PairingDisabled => StatusCode::FORBIDDEN,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+
+            (
+                status,
+                Json(HttpEnrollResponse {
+                    success: false,
+                    client_cert_pem: String::new(),
+                    ca_cert_pem: String::new(),
+                    error_message: e.to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(EnrollFailure::Signer(e)) => {
             error!(node_id = %node_id, error = %e, "Failed to sign worker CSR via HTTP");
             (
                 StatusCode::BAD_REQUEST,
@@ -347,5 +378,42 @@ mod tests {
         let body = resp.into_inner();
         assert!(!body.success);
         assert!(body.error_message.contains("mismatch"));
+    }
+
+    #[tokio::test]
+    async fn test_malformed_csr_does_not_burn_pairing_token() {
+        let (ctx, _ca_key, _ca_pem) = create_test_context();
+        let service =
+            EnrollmentServiceImpl::new(Arc::clone(&ctx.token_store), Arc::clone(&ctx.signer));
+
+        let node_id = "worker-retry-csr";
+        let record = ctx
+            .token_store
+            .generate_token(Some(node_id.to_string()), Some(300))
+            .expect("Token generation");
+
+        // Submit malformed CSR first
+        let bad_req = tonic::Request::new(EnrollWorkerRequest {
+            pairing_token: record.token.clone(),
+            node_id: node_id.to_string(),
+            csr_pem: "NOT A VALID CSR".to_string(),
+        });
+        let bad_resp = service.enroll_worker(bad_req).await.expect("RPC call");
+        assert!(!bad_resp.into_inner().success);
+
+        // Retry with valid CSR must succeed using the same token
+        let (csr_pem, _key) = generate_test_csr(node_id);
+        let good_req = tonic::Request::new(EnrollWorkerRequest {
+            pairing_token: record.token,
+            node_id: node_id.to_string(),
+            csr_pem,
+        });
+        let good_resp = service.enroll_worker(good_req).await.expect("RPC call");
+        let body = good_resp.into_inner();
+        assert!(
+            body.success,
+            "Retry with valid CSR must succeed: {}",
+            body.error_message
+        );
     }
 }

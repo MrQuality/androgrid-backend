@@ -5,10 +5,10 @@
 //!
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001], [REQ-OP-001]
 
-use sha2::{Digest, Sha256};
+use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::RwLock;
+use std::fmt::Write as _;
+use std::sync::{Mutex, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -18,6 +18,12 @@ pub const DEFAULT_PAIRING_TOKEN_TTL_SECONDS: u32 = 300;
 
 /// Maximum failed enrollment attempts before rate-limiting triggers.
 pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
+
+/// Sliding window duration in seconds for unknown-token brute-force protection.
+pub const GLOBAL_RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
+/// Maximum number of token records retained in memory before forced eviction.
+pub const MAX_TRACKED_TOKENS: usize = 10_000;
 
 /// Errors arising from pairing token validation and redemption.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -42,6 +48,22 @@ pub enum PairingError {
 
     #[error("Pairing feature is disabled by cluster configuration")]
     PairingDisabled,
+
+    #[error("Cryptographic random number generator failure")]
+    RngFailure,
+}
+
+/// Error returned by [`PairingTokenStore::redeem_with`], distinguishing token
+/// validation failures from downstream signing/provisioning failures.
+#[derive(Debug)]
+pub enum RedeemActionError<E> {
+    Pairing(PairingError),
+    Action(E),
+}
+
+struct GlobalAttemptWindow {
+    window_start_epoch_s: u64,
+    failed_attempts: u32,
 }
 
 /// Metadata record for an active or redeemed ephemeral pairing token.
@@ -71,7 +93,7 @@ pub struct PairingTokenRecord {
 /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
 pub struct PairingTokenStore {
     tokens: RwLock<HashMap<String, PairingTokenRecord>>,
-    global_failed_attempts: AtomicU32,
+    global_window: Mutex<GlobalAttemptWindow>,
     max_failed_attempts: u32,
     enabled: bool,
 }
@@ -91,7 +113,10 @@ impl PairingTokenStore {
     pub fn new(enabled: bool, max_failed_attempts: u32) -> Self {
         Self {
             tokens: RwLock::new(HashMap::new()),
-            global_failed_attempts: AtomicU32::new(0),
+            global_window: Mutex::new(GlobalAttemptWindow {
+                window_start_epoch_s: 0,
+                failed_attempts: 0,
+            }),
             max_failed_attempts,
             enabled,
         }
@@ -127,17 +152,7 @@ impl PairingTokenStore {
             .unwrap_or(DEFAULT_PAIRING_TOKEN_TTL_SECONDS) as u64;
 
         let expires_at = now + ttl;
-
-        // Generate high-entropy token via SHA-256 of system entropy + timestamp
-        let mut hasher = Sha256::new();
-        hasher.update(now.to_le_bytes());
-        hasher.update(expires_at.to_le_bytes());
-        if let Some(ref node_id) = target_node_id {
-            hasher.update(node_id.as_bytes());
-        }
-        let rand_bytes: [u8; 16] = rand_bytes_16();
-        hasher.update(rand_bytes);
-        let token = format!("{:x}", hasher.finalize());
+        let token = generate_csprng_token_hex()?;
 
         let record = PairingTokenRecord {
             token: token.clone(),
@@ -149,9 +164,124 @@ impl PairingTokenStore {
         };
 
         let mut lock = self.tokens.write().expect("Token store lock poisoned");
+        lock.retain(|_, existing| existing.expires_at_epoch_s >= now);
+        if lock.len() >= MAX_TRACKED_TOKENS {
+            lock.retain(|_, existing| !existing.is_redeemed);
+        }
+        if lock.len() >= MAX_TRACKED_TOKENS {
+            if let Some(oldest_key) = lock
+                .iter()
+                .min_by_key(|(_, existing)| existing.created_at_epoch_s)
+                .map(|(k, _)| k.clone())
+            {
+                lock.remove(&oldest_key);
+            }
+        }
         lock.insert(token, record.clone());
 
         Ok(record)
+    }
+
+    /// Atomically validates a pairing token, executes `action`, and marks the token
+    /// as redeemed only if `action` succeeds.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    pub fn redeem_with<F, T, E>(
+        &self,
+        token: &str,
+        requested_node_id: &str,
+        action: F,
+    ) -> Result<T, RedeemActionError<E>>
+    where
+        F: FnOnce(&PairingTokenRecord) -> Result<T, E>,
+    {
+        if !self.enabled {
+            return Err(RedeemActionError::Pairing(PairingError::PairingDisabled));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+
+        self.check_global_window(now)
+            .map_err(RedeemActionError::Pairing)?;
+
+        let mut lock = self.tokens.write().expect("Token store lock poisoned");
+        let record = match lock.get_mut(token) {
+            Some(r) => r,
+            None => {
+                self.record_global_failure(now);
+                return Err(RedeemActionError::Pairing(PairingError::TokenNotFound));
+            }
+        };
+
+        if record.failed_attempts >= self.max_failed_attempts {
+            return Err(RedeemActionError::Pairing(PairingError::RateLimitExceeded));
+        }
+
+        if record.is_redeemed {
+            record.failed_attempts += 1;
+            return Err(RedeemActionError::Pairing(
+                PairingError::TokenAlreadyRedeemed,
+            ));
+        }
+
+        if now > record.expires_at_epoch_s {
+            record.failed_attempts += 1;
+            return Err(RedeemActionError::Pairing(PairingError::TokenExpired {
+                expired_at_epoch_s: record.expires_at_epoch_s,
+                current_epoch_s: now,
+            }));
+        }
+
+        if let Some(ref expected_node) = record.target_node_id {
+            if expected_node != requested_node_id {
+                record.failed_attempts += 1;
+                return Err(RedeemActionError::Pairing(PairingError::NodeIdMismatch {
+                    expected: expected_node.clone(),
+                    actual: requested_node_id.to_string(),
+                }));
+            }
+        }
+
+        match action(record) {
+            Ok(result) => {
+                record.is_redeemed = true;
+                Ok(result)
+            }
+            Err(err) => {
+                record.failed_attempts += 1;
+                Err(RedeemActionError::Action(err))
+            }
+        }
+    }
+
+    fn check_global_window(&self, now: u64) -> Result<(), PairingError> {
+        let mut window = self
+            .global_window
+            .lock()
+            .expect("Global attempt window lock poisoned");
+        if now.saturating_sub(window.window_start_epoch_s) >= GLOBAL_RATE_LIMIT_WINDOW_SECS {
+            window.window_start_epoch_s = now;
+            window.failed_attempts = 0;
+        }
+        if window.failed_attempts >= self.max_failed_attempts.saturating_mul(10) {
+            return Err(PairingError::RateLimitExceeded);
+        }
+        Ok(())
+    }
+
+    fn record_global_failure(&self, now: u64) {
+        let mut window = self
+            .global_window
+            .lock()
+            .expect("Global attempt window lock poisoned");
+        if now.saturating_sub(window.window_start_epoch_s) >= GLOBAL_RATE_LIMIT_WINDOW_SECS {
+            window.window_start_epoch_s = now;
+            window.failed_attempts = 0;
+        }
+        window.failed_attempts = window.failed_attempts.saturating_add(1);
     }
 
     /// Atomically validates and redeems a pairing token for enrollment.
@@ -171,59 +301,16 @@ impl PairingTokenStore {
         token: &str,
         requested_node_id: &str,
     ) -> Result<PairingTokenRecord, PairingError> {
-        if !self.enabled {
-            return Err(PairingError::PairingDisabled);
-        }
-
-        if self.global_failed_attempts.load(Ordering::Acquire) >= self.max_failed_attempts * 10 {
-            return Err(PairingError::RateLimitExceeded);
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::ZERO)
-            .as_secs();
-
-        let mut lock = self.tokens.write().expect("Token store lock poisoned");
-        let record = match lock.get_mut(token) {
-            Some(r) => r,
-            None => {
-                self.global_failed_attempts.fetch_add(1, Ordering::Relaxed);
-                return Err(PairingError::TokenNotFound);
-            }
-        };
-
-        if record.failed_attempts >= self.max_failed_attempts {
-            return Err(PairingError::RateLimitExceeded);
-        }
-
-        if record.is_redeemed {
-            record.failed_attempts += 1;
-            return Err(PairingError::TokenAlreadyRedeemed);
-        }
-
-        if now > record.expires_at_epoch_s {
-            record.failed_attempts += 1;
-            return Err(PairingError::TokenExpired {
-                expired_at_epoch_s: record.expires_at_epoch_s,
-                current_epoch_s: now,
-            });
-        }
-
-        if let Some(ref expected_node) = record.target_node_id {
-            if expected_node != requested_node_id {
-                record.failed_attempts += 1;
-                return Err(PairingError::NodeIdMismatch {
-                    expected: expected_node.clone(),
-                    actual: requested_node_id.to_string(),
-                });
-            }
-        }
-
-        // Atomically redeem token
-        record.is_redeemed = true;
-        let committed = record.clone();
-        Ok(committed)
+        self.redeem_with(token, requested_node_id, |record| {
+            Ok::<_, std::convert::Infallible>(PairingTokenRecord {
+                is_redeemed: true,
+                ..record.clone()
+            })
+        })
+        .map_err(|err| match err {
+            RedeemActionError::Pairing(p) => p,
+            RedeemActionError::Action(never) => match never {},
+        })
     }
 
     /// Revokes an active token.
@@ -244,7 +331,8 @@ impl PairingTokenStore {
         lock.get(token).cloned()
     }
 
-    /// Prunes expired tokens from memory.
+    /// Prunes expired tokens from memory while retaining un-expired redeemed
+    /// tokens until their TTL elapses so replay attempts remain distinguishable.
     pub fn prune_expired(&self) -> usize {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -253,7 +341,7 @@ impl PairingTokenStore {
 
         let mut lock = self.tokens.write().expect("Token store lock poisoned");
         let initial_len = lock.len();
-        lock.retain(|_, record| !record.is_redeemed && record.expires_at_epoch_s > now);
+        lock.retain(|_, record| record.expires_at_epoch_s >= now);
         initial_len - lock.len()
     }
 
@@ -263,17 +351,16 @@ impl PairingTokenStore {
     }
 }
 
-/// Generates 16 random bytes using platform entropy and nanosecond clock.
-fn rand_bytes_16() -> [u8; 16] {
-    let mut bytes = [0u8; 16];
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
-    let p1 = nanos.to_le_bytes();
-    bytes[..8].copy_from_slice(&p1[..8]);
-    bytes[8..16].copy_from_slice(&p1[8..16]);
-    bytes
+/// Generates a 256-bit cryptographically secure random token encoded as 64 hex chars.
+fn generate_csprng_token_hex() -> Result<String, PairingError> {
+    let rng = SystemRandom::new();
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes).map_err(|_| PairingError::RngFailure)?;
+    let mut hex = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(&mut hex, "{:02x}", b);
+    }
+    Ok(hex)
 }
 
 #[cfg(test)]
@@ -411,5 +498,105 @@ mod tests {
         assert!(store.revoke_token(&record.token));
         assert!(store.get_token(&record.token).is_none());
         assert!(!store.revoke_token(&record.token));
+    }
+
+    #[test]
+    fn test_redeem_with_does_not_burn_token_on_action_failure() {
+        let store = PairingTokenStore::default();
+        let record = store
+            .generate_token(Some("worker-node-1".to_string()), Some(300))
+            .expect("Token generation should succeed");
+
+        // Simulate downstream CSR validation failure before redemption
+        let err = store
+            .redeem_with(&record.token, "worker-node-1", |_| {
+                Err::<(), _>("malformed CSR")
+            })
+            .expect_err("Action failure should propagate");
+        assert!(matches!(err, RedeemActionError::Action("malformed CSR")));
+
+        // Token must still be unredeemed so a corrected retry succeeds
+        let snapshot = store.get_token(&record.token).unwrap();
+        assert!(!snapshot.is_redeemed);
+        assert_eq!(snapshot.failed_attempts, 1);
+
+        let ok = store
+            .redeem_with(&record.token, "worker-node-1", |_| {
+                Ok::<_, &str>("issued-cert")
+            })
+            .expect("Subsequent valid attempt should succeed");
+        assert_eq!(ok, "issued-cert");
+        assert!(store.get_token(&record.token).unwrap().is_redeemed);
+    }
+
+    #[test]
+    fn test_prune_expired_keeps_unexpired_redeemed_tokens_and_removes_expired() {
+        let store = PairingTokenStore::default();
+        let active_redeemed = store.generate_token(None, Some(300)).unwrap();
+        store.redeem_token(&active_redeemed.token, "w1").unwrap();
+
+        {
+            let mut lock = store.tokens.write().unwrap();
+            lock.insert(
+                "expired-token".to_string(),
+                PairingTokenRecord {
+                    token: "expired-token".to_string(),
+                    target_node_id: None,
+                    created_at_epoch_s: 10,
+                    expires_at_epoch_s: 20,
+                    is_redeemed: false,
+                    failed_attempts: 0,
+                },
+            );
+        }
+
+        let pruned = store.prune_expired();
+        assert_eq!(pruned, 1);
+        assert!(store.get_token("expired-token").is_none());
+        assert!(store.get_token(&active_redeemed.token).is_some());
+        assert_eq!(
+            store.redeem_token(&active_redeemed.token, "w1"),
+            Err(PairingError::TokenAlreadyRedeemed)
+        );
+    }
+
+    #[test]
+    fn test_unknown_token_rate_limit_decays_after_window() {
+        let store = PairingTokenStore::new(true, 1);
+        for _ in 0..10 {
+            assert_eq!(
+                store.redeem_token("bogus", "w1"),
+                Err(PairingError::TokenNotFound)
+            );
+        }
+        assert_eq!(
+            store.redeem_token("bogus", "w1"),
+            Err(PairingError::RateLimitExceeded)
+        );
+
+        // Simulate window expiry by shifting window_start back past GLOBAL_RATE_LIMIT_WINDOW_SECS
+        {
+            let mut window = store.global_window.lock().unwrap();
+            window.window_start_epoch_s = window
+                .window_start_epoch_s
+                .saturating_sub(GLOBAL_RATE_LIMIT_WINDOW_SECS + 1);
+        }
+
+        assert_eq!(
+            store.redeem_token("bogus", "w1"),
+            Err(PairingError::TokenNotFound)
+        );
+    }
+
+    #[test]
+    fn test_tokens_are_unique_csprng_hex() {
+        let store = PairingTokenStore::default();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let rec = store.generate_token(None, Some(60)).unwrap();
+            assert_eq!(rec.token.len(), 64);
+            assert!(rec.token.chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(seen.insert(rec.token));
+        }
     }
 }

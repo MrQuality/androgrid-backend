@@ -67,17 +67,25 @@ pub fn normalize_cluster_endpoint(endpoint: &str, default_port: u16) -> Result<S
         if let Some(end_bracket) = authority.find(']') {
             let host_part = &authority[..=end_bracket];
             let rest = &authority[end_bracket + 1..];
-            let has_port = rest
-                .strip_prefix(':')
-                .is_some_and(|p| !p.is_empty() && p.parse::<u16>().is_ok());
+            let has_port = if rest.is_empty() {
+                false
+            } else if let Some(port_part) = rest.strip_prefix(':') {
+                if port_part.parse::<u16>().is_ok_and(|p| p > 0) {
+                    true
+                } else {
+                    return Err(format!("Invalid port in endpoint '{authority}'"));
+                }
+            } else {
+                return Err(format!("Invalid port in endpoint '{authority}'"));
+            };
             (host_part, has_port)
         } else {
             return Err(format!("Malformed IPv6 endpoint '{authority}'"));
         }
     } else if let Some((host_part, port_part)) = authority.rsplit_once(':') {
-        if !host_part.contains(':') && !port_part.is_empty() && port_part.parse::<u16>().is_ok() {
+        if !host_part.contains(':') && port_part.parse::<u16>().is_ok_and(|p| p > 0) {
             (host_part, true)
-        } else if authority.contains(':') {
+        } else if authority.contains(':') && host_part.contains(':') {
             // Unbracketed IPv6 literal without port
             (authority.as_str(), false)
         } else {
@@ -289,5 +297,8 @@ mod tests {
         );
         assert!(normalize_cluster_endpoint("0.0.0.0:50051", 50051).is_err());
         assert!(normalize_cluster_endpoint("[::]:50051", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::1]:badport", 50051).is_err());
+        assert!(normalize_cluster_endpoint("[::1]:0", 50051).is_err());
+        assert!(normalize_cluster_endpoint("127.0.0.1:0", 50051).is_err());
     }
 }

@@ -211,6 +211,7 @@ impl PairingTokenStore {
         let record = match lock.get_mut(token) {
             Some(r) => r,
             None => {
+                drop(lock);
                 self.record_global_failure(now);
                 return Err(RedeemActionError::Pairing(PairingError::TokenNotFound));
             }

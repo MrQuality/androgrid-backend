@@ -118,18 +118,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let mtls_enabled = config.is_mtls_configured();
+    let mtls_guard = ConditionalMtlsInterceptor { mtls_enabled };
     let service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
     let service_server = tonic::codegen::InterceptedService::new(
         AndroGridServiceServer::new(service)
             .max_decoding_message_size(config.max_frame_size_bytes)
             .max_encoding_message_size(config.max_frame_size_bytes),
-        move |req| {
-            if mtls_enabled {
-                require_client_mtls_interceptor(req)
-            } else {
-                Ok(req)
-            }
-        },
+        mtls_guard,
     );
 
     let cluster_endpoint = config.listen_addr.to_string();
@@ -145,13 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AdminServiceServer::new(admin_service)
             .max_decoding_message_size(config.max_frame_size_bytes)
             .max_encoding_message_size(config.max_frame_size_bytes),
-        move |req| {
-            if mtls_enabled {
-                require_client_mtls_interceptor(req)
-            } else {
-                Ok(req)
-            }
-        },
+        mtls_guard,
     );
 
     let (artifact_shutdown_tx, artifact_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -219,4 +208,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("AndroGrid Control Plane terminated cleanly");
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct ConditionalMtlsInterceptor {
+    mtls_enabled: bool,
+}
+
+impl tonic::service::Interceptor for ConditionalMtlsInterceptor {
+    #[allow(clippy::result_large_err)]
+    fn call(&mut self, req: tonic::Request<()>) -> Result<tonic::Request<()>, tonic::Status> {
+        if self.mtls_enabled {
+            require_client_mtls_interceptor(req)
+        } else {
+            Ok(req)
+        }
+    }
 }

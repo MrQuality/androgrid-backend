@@ -110,12 +110,44 @@ class TestPkiManager(unittest.TestCase):
     def test_pki_paths(self):
         pki = PkiManager(pki_dir=Path("/tmp/pki_test"))
         paths = pki.get_paths()
-        self.assertEqual(paths["ca_cert"], Path("/tmp/pki_test/ca.crt"))
-        self.assertEqual(paths["server_cert"], Path("/tmp/pki_test/server.crt"))
-        self.assertEqual(paths["server_key"], Path("/tmp/pki_test/server.key"))
+        self.assertEqual(paths["ca_cert"], Path("/tmp/pki_test/runtime/ca.crt"))
+        self.assertEqual(paths["server_cert"], Path("/tmp/pki_test/runtime/server.crt"))
+        self.assertEqual(paths["server_key"], Path("/tmp/pki_test/runtime/server.key"))
+        self.assertEqual(paths["admin_cert"], Path("/tmp/pki_test/operator/admin.crt"))
+        self.assertEqual(paths["admin_key"], Path("/tmp/pki_test/operator/admin.key"))
         self.assertEqual(paths["client_cert"], Path("/tmp/pki_test/client.crt"))
         self.assertEqual(paths["client_key"], Path("/tmp/pki_test/client.key"))
         self.assertEqual(paths["untrusted_cert"], Path("/tmp/pki_test/untrusted_client.crt"))
+        self.assertNotIn("client_p12", paths)
+
+    @patch("subprocess.run")
+    def test_generate_invokes_cli_cert_init_and_issue_csr(self, mock_run):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = PkiManager(Path(tmp) / "pki")
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            mgr.generate("node_smoke_01", additional_san="192.168.1.50")
+
+            calls = [c.args[0] for c in mock_run.call_args_list]
+            self.assertGreaterEqual(len(calls), 4)
+            self.assertIn("cert", calls[0])
+            self.assertIn("init", calls[0])
+            self.assertIn("--san", calls[0])
+            self.assertIn("192.168.1.50", calls[0])
+            csr_issue_calls = [c for c in calls if "issue" in c and "csr" in c]
+            self.assertEqual(len(csr_issue_calls), 1)
+            self.assertIn("node_smoke_01", csr_issue_calls[0])
+
+    @patch("subprocess.run")
+    def test_generate_fails_fast_when_cert_init_errors(self, mock_run):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            mgr = PkiManager(Path(tmp) / "pki")
+            mock_run.return_value = MagicMock(returncode=2, stdout="", stderr="invalid SAN")
+            with self.assertRaises(RuntimeError) as ctx:
+                mgr.generate("node_smoke_01")
+            self.assertIn("androgrid-cli cert init failed", str(ctx.exception))
+            self.assertEqual(mock_run.call_count, 1)
 
 
 class TestSmokeTestRunnerLifecycle(unittest.TestCase):
@@ -153,9 +185,9 @@ class TestSmokeTestRunnerLifecycle(unittest.TestCase):
         ]
         summary = self.runner.poll_task_completion(
             task_id="task_1",
-            ca_cert=Path("pki/ca.crt"),
-            client_cert=Path("pki/client.crt"),
-            client_key=Path("pki/client.key"),
+            ca_cert=Path("pki/runtime/ca.crt"),
+            client_cert=Path("pki/operator/admin.crt"),
+            client_key=Path("pki/operator/admin.key"),
             max_attempts=5,
             poll_interval=0.01
         )

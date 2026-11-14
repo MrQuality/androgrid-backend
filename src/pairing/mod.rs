@@ -6,11 +6,13 @@
 //!
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001], [REQ-OP-001]
 
+pub mod pki;
 pub mod qr;
 pub mod service;
 pub mod signer;
 pub mod token;
 
+pub use pki::*;
 pub use qr::*;
 pub use service::*;
 pub use signer::*;

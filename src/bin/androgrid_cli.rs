@@ -5,7 +5,8 @@
 //!
 //! Traces to: AG-SPEC-2026-V2, [REQ-OP-001], [REQ-OP-004], [INV-002], [NFR-SEC-001], [NFR-PERF-001]
 
-use clap::{Parser, Subcommand};
+use clap::parser::ValueSource;
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,9 +14,11 @@ use std::time::SystemTime;
 
 use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
-    build_client_mtls_config, export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig,
-    BenchmarkDispatcher, BenchmarkFilter, CancelTaskRequest, ExecutionEngine,
-    GeneratePairingTokenRequest, GetTaskStatusRequest, ListTasksRequest, ListWorkerNodesRequest,
+    build_client_mtls_config, cert_init, cert_issue_admin, cert_issue_csr, cert_issue_server,
+    export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig, BenchmarkDispatcher,
+    BenchmarkFilter, CaSource, CancelTaskRequest, ExecutionEngine, GeneratePairingTokenRequest,
+    GetTaskStatusRequest, ListTasksRequest, ListWorkerNodesRequest, PkiInitConfig,
+    PkiIssueAdminConfig, PkiIssueCsrConfig, PkiIssueServerConfig, PkiOperationSummary,
     SubmitTaskRequest, TaskSpec, TaskState, TerminalGuard, TuiAction, TuiApp,
     UploadArtifactRequest, WasiValidator,
 };
@@ -202,6 +205,149 @@ enum Commands {
         /// Polling refresh interval in seconds (default: 1)
         #[arg(long, default_value_t = 1)]
         refresh_rate: u64,
+    },
+
+    /// Offline pure-Rust cluster PKI lifecycle management (ECDSA P-256, OpenSSL-free)
+    /// Traces to: ADR-001, [INV-002], [NFR-SEC-001], [REQ-OP-001]
+    Cert {
+        #[command(subcommand)]
+        action: CertCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CertCommands {
+    /// Initialize Day-0 Root CA, orchestrator server fullchain, and operator admin certificate
+    Init {
+        /// Output directory for PKI hierarchy (creates runtime/ and operator/)
+        #[arg(long, default_value = "./pki")]
+        out: PathBuf,
+
+        /// Additional SAN DNS name or IP address for server.crt (repeatable)
+        #[arg(long)]
+        san: Vec<String>,
+
+        /// Omit default loopback/emulator SANs (requires at least one --san)
+        #[arg(long)]
+        no_default_sans: bool,
+
+        /// Root CA validity in days (default: 1825)
+        #[arg(long, default_value_t = 1825)]
+        ca_days: u32,
+
+        /// Server and admin leaf certificate validity in days (default: 365)
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+
+        /// Common Name (CN) for operator admin certificate
+        #[arg(long, default_value = "operator")]
+        admin_cn: String,
+
+        /// Allow overwriting existing CA or certificate files
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Issue or rotate leaf certificates using an existing Root CA
+    Issue {
+        #[command(subcommand)]
+        target: CertIssueCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum CertIssueCommands {
+    /// Issue or rotate orchestrator server.crt (fullchain) and server.key
+    Server {
+        /// Directory containing existing CA files (defaults to ./pki when --ca-key is omitted)
+        #[arg(long, conflicts_with = "ca_key")]
+        ca_dir: Option<PathBuf>,
+
+        /// Explicit path to Root CA private key PEM (requires --ca-cert)
+        #[arg(long, conflicts_with = "ca_dir")]
+        ca_key: Option<PathBuf>,
+
+        /// Output directory for rotated server.crt and server.key
+        #[arg(long, default_value = "./pki/runtime")]
+        out: PathBuf,
+
+        /// Additional SAN DNS name or IP address (repeatable)
+        #[arg(long)]
+        san: Vec<String>,
+
+        /// Omit default loopback/emulator SANs (requires at least one --san)
+        #[arg(long)]
+        no_default_sans: bool,
+
+        /// Certificate validity in days (default: 365)
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+
+        /// Allow overwriting existing server.crt / server.key
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Issue or rotate operator admin.crt and admin.key (OU=Control Plane)
+    Admin {
+        /// Directory containing existing CA files (defaults to ./pki when --ca-key is omitted)
+        #[arg(long, conflicts_with = "ca_key")]
+        ca_dir: Option<PathBuf>,
+
+        /// Explicit path to Root CA private key PEM (requires --ca-cert)
+        #[arg(long, conflicts_with = "ca_dir")]
+        ca_key: Option<PathBuf>,
+
+        /// Output directory for rotated admin.crt and admin.key
+        #[arg(long, default_value = "./pki/operator")]
+        out: PathBuf,
+
+        /// Common Name (CN) for operator admin certificate
+        #[arg(long, default_value = "operator")]
+        cn: String,
+
+        /// Certificate validity in days (default: 365)
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+
+        /// Allow overwriting existing admin.crt / admin.key
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Sign a worker PKCS#10 CSR offline using CaSigner policy
+    Csr {
+        /// Path to worker PKCS#10 CSR PEM file
+        #[arg(long)]
+        csr: PathBuf,
+
+        /// Expected worker node identifier (must match CSR CN)
+        #[arg(long)]
+        node_id: String,
+
+        /// Directory containing existing CA files (defaults to ./pki when --ca-key is omitted)
+        #[arg(long, conflicts_with = "ca_key")]
+        ca_dir: Option<PathBuf>,
+
+        /// Explicit path to Root CA private key PEM (requires --ca-cert)
+        #[arg(long, conflicts_with = "ca_dir")]
+        ca_key: Option<PathBuf>,
+
+        /// Output file path for signed worker client certificate PEM
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Optional output file path to also write Root CA certificate PEM
+        #[arg(long)]
+        ca_out: Option<PathBuf>,
+
+        /// Certificate validity in days (default: 365)
+        #[arg(long, default_value_t = 365)]
+        days: u32,
+
+        /// Allow overwriting existing output certificate file(s)
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -463,7 +609,9 @@ async fn run_top(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let matches = Cli::command().get_matches();
+    let ca_cert_from_cli = matches.value_source("ca_cert") == Some(ValueSource::CommandLine);
+    let cli = Cli::from_arg_matches(&matches)?;
 
     if let Commands::Pack {
         wasm,
@@ -556,6 +704,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if let Commands::Cert { action } = cli.command {
+        return handle_cert_command(
+            action,
+            cli.ca_cert.as_deref(),
+            ca_cert_from_cli,
+            &cli.format,
+        );
+    }
+
     let channel = create_channel(
         &cli.endpoint,
         cli.ca_cert.as_deref(),
@@ -569,6 +726,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Pack { .. } => unreachable!(),
         Commands::Benchmark { .. } => unreachable!(),
+        Commands::Cert { .. } => unreachable!(),
 
         Commands::Top { refresh_rate } => {
             run_top(client, &cli.endpoint, refresh_rate).await?;
@@ -909,6 +1067,171 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// Executes offline cluster PKI lifecycle commands (`cert init`, `cert issue ...`).
+fn handle_cert_command(
+    action: CertCommands,
+    global_ca_cert: Option<&Path>,
+    ca_cert_from_cli: bool,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        CertCommands::Init {
+            out,
+            san,
+            no_default_sans,
+            ca_days,
+            days,
+            admin_cn,
+            force,
+        } => {
+            let summary = cert_init(&PkiInitConfig {
+                out_dir: out,
+                extra_sans: san,
+                no_default_sans,
+                ca_days,
+                days,
+                admin_cn,
+                force,
+            })?;
+            print_cert_summary(&summary, format, None)?;
+        }
+        CertCommands::Issue { target } => {
+            match target {
+                CertIssueCommands::Server {
+                    ca_dir,
+                    ca_key,
+                    out,
+                    san,
+                    no_default_sans,
+                    days,
+                    force,
+                } => {
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
+                    let summary = cert_issue_server(&PkiIssueServerConfig {
+                        ca_source,
+                        out_dir: out,
+                        extra_sans: san,
+                        no_default_sans,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(
+                    &summary,
+                    format,
+                    Some("Restart androgrid-backend to load the rotated server certificate and key."),
+                )?;
+                }
+                CertIssueCommands::Admin {
+                    ca_dir,
+                    ca_key,
+                    out,
+                    cn,
+                    days,
+                    force,
+                } => {
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
+                    let summary = cert_issue_admin(&PkiIssueAdminConfig {
+                        ca_source,
+                        out_dir: out,
+                        cn,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(&summary, format, None)?;
+                }
+                CertIssueCommands::Csr {
+                    csr,
+                    node_id,
+                    ca_dir,
+                    ca_key,
+                    out,
+                    ca_out,
+                    days,
+                    force,
+                } => {
+                    let ca_source =
+                        resolve_ca_source(ca_dir, global_ca_cert, ca_cert_from_cli, ca_key)?;
+                    let summary = cert_issue_csr(&PkiIssueCsrConfig {
+                        ca_source,
+                        csr_path: csr,
+                        node_id,
+                        out_path: out,
+                        ca_out_path: ca_out,
+                        days,
+                        force,
+                    })?;
+                    print_cert_summary(&summary, format, None)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resolve_ca_source(
+    ca_dir: Option<PathBuf>,
+    global_ca_cert: Option<&Path>,
+    ca_cert_from_cli: bool,
+    ca_key: Option<PathBuf>,
+) -> Result<CaSource, Box<dyn std::error::Error>> {
+    if let Some(key_path) = ca_key {
+        if ca_dir.is_some() {
+            return Err("Cannot combine --ca-dir with --ca-key".into());
+        }
+        let cert_path = global_ca_cert
+            .ok_or("Explicit --ca-key requires --ca-cert (or ANDROGRID_CA_CERT) to be specified")?;
+        Ok(CaSource::Files {
+            ca_cert: cert_path.to_path_buf(),
+            ca_key: key_path,
+        })
+    } else if ca_cert_from_cli {
+        Err("Explicit --ca-cert requires --ca-key (or omit --ca-cert to use --ca-dir)".into())
+    } else {
+        Ok(CaSource::Dir(
+            ca_dir.unwrap_or_else(|| PathBuf::from("./pki")),
+        ))
+    }
+}
+
+fn print_cert_summary(
+    summary: &PkiOperationSummary,
+    format: &str,
+    notice: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(summary)?);
+        if let Some(msg) = notice {
+            eprintln!("[!] Notice: {msg}");
+        }
+    } else {
+        println!("[+] {}", summary.action);
+        println!("    CA SHA-256: {}", summary.ca_fingerprint);
+        if let Some(ref cn) = summary.cn {
+            println!("    CN:         {cn}");
+        }
+        if let Some(ref node_id) = summary.node_id {
+            println!("    Node ID:    {node_id}");
+        }
+        if !summary.sans.is_empty() {
+            println!("    SANs:       {}", summary.sans.join(", "));
+        }
+        println!(
+            "    Validity:   {} days ({} -> {})",
+            summary.days_valid, summary.not_before, summary.not_after
+        );
+        println!("    Files:");
+        for file in &summary.files {
+            println!("      - {file}");
+        }
+        if let Some(msg) = notice {
+            println!("[!] Notice: {msg}");
+        }
+    }
     Ok(())
 }
 
@@ -1279,5 +1602,132 @@ mod tests {
             }
             _ => panic!("Expected Benchmark command"),
         }
+    }
+
+    #[test]
+    fn test_cli_parse_cert_init_and_issue() {
+        let init_cli = Cli::try_parse_from([
+            "androgrid-cli",
+            "--format",
+            "json",
+            "cert",
+            "init",
+            "--out",
+            "/tmp/pki",
+            "--san",
+            "192.168.1.10",
+            "--san",
+            "grid.example.com",
+            "--ca-days",
+            "3650",
+            "--days",
+            "180",
+            "--force",
+        ])
+        .expect("cert init parse should succeed");
+        assert_eq!(init_cli.format, "json");
+        match init_cli.command {
+            Commands::Cert {
+                action:
+                    CertCommands::Init {
+                        out,
+                        san,
+                        ca_days,
+                        days,
+                        force,
+                        ..
+                    },
+            } => {
+                assert_eq!(out, PathBuf::from("/tmp/pki"));
+                assert_eq!(san, vec!["192.168.1.10", "grid.example.com"]);
+                assert_eq!(ca_days, 3650);
+                assert_eq!(days, 180);
+                assert!(force);
+            }
+            _ => panic!("Expected Cert Init"),
+        }
+
+        let issue_srv = Cli::try_parse_from([
+            "androgrid-cli",
+            "cert",
+            "issue",
+            "server",
+            "--ca-cert",
+            "/tmp/ca.crt",
+            "--ca-key",
+            "/tmp/ca.key",
+            "--no-default-sans",
+            "--san",
+            "edge.example.com",
+        ])
+        .expect("cert issue server with explicit CA files should parse");
+        assert_eq!(issue_srv.ca_cert, Some(PathBuf::from("/tmp/ca.crt")));
+    }
+
+    #[test]
+    fn test_resolve_ca_source_validation_and_files_execution() {
+        // 1. Explicit CLI --ca-cert without --ca-key must fail
+        let err = resolve_ca_source(None, Some(Path::new("/tmp/ca.crt")), true, None)
+            .expect_err("Explicit --ca-cert without --ca-key must fail");
+        assert!(err.to_string().contains("--ca-key"));
+
+        // 2. Env-sourced ANDROGRID_CA_CERT without --ca-key still allows --ca-dir
+        let dir_src = resolve_ca_source(
+            Some(PathBuf::from("/tmp/pki")),
+            Some(Path::new("/env/ca.crt")),
+            false,
+            None,
+        )
+        .expect("Env CA cert must not break --ca-dir");
+        assert!(matches!(dir_src, CaSource::Dir(p) if p == Path::new("/tmp/pki")));
+
+        // 3. Combining --ca-dir and --ca-key must fail
+        let conflict = resolve_ca_source(
+            Some(PathBuf::from("/tmp/pki")),
+            Some(Path::new("/tmp/ca.crt")),
+            true,
+            Some(PathBuf::from("/tmp/ca.key")),
+        )
+        .expect_err("Combining --ca-dir and --ca-key must fail");
+        assert!(conflict.to_string().contains("Cannot combine"));
+
+        // 4. Execute CaSource::Files end-to-end
+        let root = std::env::temp_dir().join(format!(
+            "androgrid_cli_ca_files_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        cert_init(&PkiInitConfig {
+            out_dir: root.clone(),
+            extra_sans: vec![],
+            no_default_sans: false,
+            ca_days: 365,
+            days: 30,
+            admin_cn: "operator".to_string(),
+            force: false,
+        })
+        .unwrap();
+
+        let files_src = resolve_ca_source(
+            None,
+            Some(&root.join("runtime/ca.crt")),
+            true,
+            Some(root.join("operator/ca.key")),
+        )
+        .unwrap();
+        let rotated = root.join("rotated_files");
+        let summary = cert_issue_server(&PkiIssueServerConfig {
+            ca_source: files_src,
+            out_dir: rotated.clone(),
+            extra_sans: vec!["files.androgrid.test".to_string()],
+            no_default_sans: true,
+            days: 60,
+            force: false,
+        })
+        .expect("cert_issue_server with CaSource::Files must succeed");
+        assert_eq!(summary.sans, vec!["files.androgrid.test"]);
+        assert!(rotated.join("server.crt").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -22,6 +22,19 @@ The following flags apply globally across all subcommands. They can be supplied 
 
 ## Subcommands
 
+### `androgrid-cli cert`
+
+Offline pure-Rust PKI lifecycle management (ECDSA P-256, OpenSSL-free). Operates without a running `androgrid-backend` instance and honors `--format text|json`.
+
+Traceability: `ADR-001`, `[INV-002]`, `[NFR-SEC-001]`, `[REQ-OP-001]`.
+
+- `androgrid-cli cert init --out ./deploy/pki [--san <HOST_OR_IP>] [--no-default-sans] [--ca-days 1825] [--days 365] [--admin-cn operator] [--force]`: Creates split `runtime/` (`ca.crt`, `server.crt` fullchain, `server.key`) and `operator/` (`ca.key`, `admin.crt`, `admin.key`) directories. Refuses to overwrite existing CA files unless `--force` is passed.
+- `androgrid-cli cert issue server [--ca-dir ./deploy/pki | --ca-cert <PATH> --ca-key <PATH>] [--out ./pki/runtime] [--san <HOST_OR_IP>] [--no-default-sans] [--days 365] [--force]`: Rotates `server.crt` (fullchain) and `server.key` without modifying the Root CA. Restart `androgrid-backend` after rotation.
+- `androgrid-cli cert issue admin [--ca-dir ./deploy/pki | --ca-cert <PATH> --ca-key <PATH>] [--out ./pki/operator] [--cn operator] [--days 365] [--force]`: Issues or rotates an operator `OU=Control Plane` client certificate.
+- `androgrid-cli cert issue csr --csr <PATH> --node-id <ID> --out <PATH> [--ca-out <PATH>] [--ca-dir ./deploy/pki | --ca-cert <PATH> --ca-key <PATH>] [--days 365] [--force]`: Signs a worker PKCS#10 CSR offline using `CaSigner` policy (for air-gapped CAs where `ANDROGRID_ALLOW_PAIRING=false`).
+
+---
+
 ### `androgrid-cli pack`
 
 Validates a compiled WebAssembly binary for WASI Preview 1 compliance, computes its cryptographic SHA-256 digest, and optionally generates an ISO 29148 deployment manifest.

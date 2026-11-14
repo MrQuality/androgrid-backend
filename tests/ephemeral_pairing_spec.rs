@@ -413,7 +413,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
     let token_store = Arc::new(PairingTokenStore::default());
     let scheduler = Arc::new(ClusterScheduler::new());
 
-    // Bundle fullchain (leaf + Root CA) just like generate_cluster_pki.sh (#41)
+    // Bundle fullchain (leaf + Root CA) matching `androgrid-cli cert init` output (#45)
     let fullchain_pem = format!("{}\n{}", pki.server_cert_pem, pki.ca_cert_pem);
     let server_tls = build_server_bootstrap_tls_config(
         fullchain_pem.as_bytes(),

@@ -1,0 +1,14 @@
+# Compose Override for Online QR Enrollment (ANDROGRID_ALLOW_PAIRING=true)
+# Usage: docker compose -f docker-compose.yml -f docker-compose.pairing.yml up -d
+# Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001], [REQ-OP-001]
+
+version: "3.8"
+
+services:
+  orchestrator:
+    environment:
+      - ANDROGRID_ALLOW_PAIRING=true
+      - ANDROGRID_CA_KEY_PATH=/etc/androgrid/ca-key/ca.key
+    volumes:
+      # Rootful Docker runs as UID 10001 (androgrid); ensure ca.key is owned by 10001:10001 with 0600 mode
+      - ./pki/operator/ca.key:/etc/androgrid/ca-key/ca.key:ro,Z

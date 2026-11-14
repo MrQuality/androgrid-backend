@@ -29,42 +29,44 @@ Before starting, ensure the following utilities are installed on your host syste
 
 ## Step 1: Generate Internal Cluster PKI Certificates
 
-All cluster communications strictly enforce Mutual TLS 1.3 (`[INV-002]`, `[NFR-SEC-001]`). Use the automated PKI generator script to construct the internal certificate authority and keys.
+All cluster communications strictly enforce Mutual TLS 1.3 (`[INV-002]`, `[NFR-SEC-001]`). Build and run `androgrid-cli cert init` to generate the pure-Rust ECDSA P-256 PKI hierarchy without any external `openssl` or `bash` dependency:
 
 ```bash
 # Navigate to the backend repository root
 cd androgrid-backend
 
-# Ensure the PKI script is executable
-chmod +x tools/pki/generate_cluster_pki.sh
+# Build the CLI binary
+cargo build --bin androgrid-cli --release
 
-# Generate the cryptographic assets
-./tools/pki/generate_cluster_pki.sh ./deploy/pki node_worker_01 androgrid_secure_pki localhost
+# Generate the split runtime/operator PKI hierarchy
+./target/release/androgrid-cli cert init --out ./deploy/pki --san localhost
 ```
 
 ### Parameter Breakdown & Architectural Significance
 
-| Argument Position | Value in Example | Description & Cryptographic Purpose |
+| Option | Value in Example | Description & Cryptographic Purpose |
 | :--- | :--- | :--- |
-| **Argument 1** | `./deploy/pki` | **Target Output Directory:** The directory where generated certificates and private keys are stored. This directory is mounted into the Podman container. |
-| **Argument 2** | `node_worker_01` | **Mobile Worker Node Identifier:** The unique Common Name (CN) and client identity embedded in the worker X.509 certificate. |
-| **Argument 3** | `androgrid_secure_pki` | **PKCS#12 Export Password:** The encryption passphrase used to protect `client.p12` when importing into the Android KeyStore. |
-| **Argument 4** | `localhost` | **Additional SAN (Subject Alternative Name):** Domain names or IP addresses added to `server.crt` to prevent TLS hostname validation errors. |
+| `--out <DIR>` | `./deploy/pki` | **Target Output Directory:** Creates `runtime/` (mounted read-only into the orchestrator container) and `operator/` (kept host-only). |
+| `--san <HOST_OR_IP>` | `localhost` | **Additional SAN (Subject Alternative Name):** Repeatable flag extending the default loopback/emulator SANs (`localhost`, `127.0.0.1`, `::1`, `10.0.2.2`, `host.docker.internal`). Pass `--no-default-sans` in production to strip dev defaults. |
+| `--ca-days <DAYS>` | `1825` | **Root CA Validity:** Lifetime of `ca.crt` in days (default 5 years). |
+| `--days <DAYS>` | `365` | **Leaf Validity:** Lifetime of `server.crt` and `admin.crt` in days (default 1 year). |
 
 ### Generated Cryptographic Assets
 
 ```text
 deploy/pki/
-|-- ca.crt          # Internal Root CA certificate (distributed to all nodes as sole trust anchor)
-|-- ca.key          # Root CA private key (kept secret on the host control plane, chmod 600)
-|-- server.crt      # Host Orchestrator server certificate with SANs (localhost, 127.0.0.1)
-|-- server.key      # Host Orchestrator private key for TLS 1.3 termination
-|-- admin.crt       # Operator Admin client certificate (OU=Control Plane)
-|-- admin.key       # Operator Admin private key
-|-- client.crt      # Worker client certificate for Mutual TLS authentication (OU=Edge Compute)
-|-- client.key      # Worker client private key
-`-- client.p12      # Encrypted PKCS#12 archive for Android KeyStore provisioning
+|-- runtime/
+|   |-- ca.crt      # Internal Root CA certificate (sole trust anchor)
+|   |-- server.crt  # Orchestrator server fullchain (leaf + Root CA)
+|   `-- server.key  # Orchestrator server private key (0600)
+`-- operator/
+    |-- ca.key      # Root CA private key (kept on host; only mounted via pairing override)
+    |-- admin.crt   # Operator Admin client certificate (OU=Control Plane)
+    `-- admin.key   # Operator Admin private key (0600, host-only)
 ```
+
+> [!NOTE]
+> **Docker vs. Podman File Permissions (`UID 10001`):** Rootless Podman (`deploy/podman-compose.yml`) uses `userns_mode: "keep-id:uid=10001,gid=10001"`, so host-owned `0600` keys work directly. For rootful Docker (`deploy/docker-compose.yml`), stage `deploy/pki/runtime/server.key` (and `ca.key` if enabling online QR pairing via `deploy/docker-compose.pairing.yml`) with `install -m 0600 -o 10001` so container user `androgrid` (`UID 10001`) can read it.
 
 <div class="callout callout-tip">
   <strong>Cryptographic Curve Selection:</strong> All keys utilize NIST curve <code>prime256v1</code> (P-256 ECDSA). P-256 provides 128-bit cryptographic security equivalent to 3072-bit RSA while reducing key size by 85%, accelerating mobile TLS handshakes, and saving battery on worker devices.
@@ -92,7 +94,7 @@ Here is what happens during initialization:
 - **`ANDROGRID_CA_CERT_PATH=/etc/androgrid/pki/ca.crt`:** Configures client authentication trust store. Any incoming connection lacking a client certificate signed by this CA is rejected during TLS 1.3 handshake.
 - **`ANDROGRID_HEARTBEAT_SECS=2`:** Sets the Wi-Fi declarative state sync heartbeat window to 2.0 seconds (`[REQ-OP-002]`).
 - **`ANDROGRID_LEASE_TIMEOUT_SECS=10`:** Marks worker nodes as disconnected if heartbeats lapse beyond 10 seconds.
-- **`volumes: ["./pki:/etc/androgrid/pki:ro,Z"]`:** Mounts the certificates as read-only (`:ro`) with private SELinux volume relabeling (`:Z`).
+- **`volumes: ["./pki/runtime:/etc/androgrid/pki:ro,Z"]`:** Mounts only the runtime certificates as read-only (`:ro`) with private SELinux volume relabeling (`:Z`), keeping `operator/admin.key` and `operator/ca.key` off the container. (Pass `-f docker-compose.yml -f docker-compose.pairing.yml` when enabling online QR enrollment.)
 
 ### Verifying Container Health
 
@@ -127,17 +129,17 @@ Execute the `nodes` subcommand to inspect the cluster inventory:
 ```bash
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
-  --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/admin.crt \
-  --client-key ./deploy/pki/admin.key \
+  --ca-cert ./deploy/pki/runtime/ca.crt \
+  --client-cert ./deploy/pki/operator/admin.crt \
+  --client-key ./deploy/pki/operator/admin.key \
   nodes
 ```
 
 #### Detailed Flag Breakdown:
 - `--endpoint https://127.0.0.1:50051`: Specifies the HTTPS/gRPC URL of the control plane orchestrator.
-- `--ca-cert ./deploy/pki/ca.crt`: Supplies the internal Root CA certificate to validate the server certificate.
-- `--client-cert ./deploy/pki/admin.crt`: Supplies the operator client certificate (`OU=Control Plane`) to authenticate against `AdminService`.
-- `--client-key ./deploy/pki/admin.key`: Supplies the operator private key for TLS 1.3 client proof of possession.
+- `--ca-cert ./deploy/pki/runtime/ca.crt`: Supplies the internal Root CA certificate to validate the server certificate.
+- `--client-cert ./deploy/pki/operator/admin.crt`: Supplies the operator client certificate (`OU=Control Plane`) to authenticate against `AdminService`.
+- `--client-key ./deploy/pki/operator/admin.key`: Supplies the operator private key for TLS 1.3 client proof of possession.
 - `nodes`: The command to list all registered worker nodes.
 
 #### Expected Output:
@@ -176,9 +178,9 @@ Submit the task to the cluster queue:
 ```bash
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
-  --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/admin.crt \
-  --client-key ./deploy/pki/admin.key \
+  --ca-cert ./deploy/pki/runtime/ca.crt \
+  --client-cert ./deploy/pki/operator/admin.crt \
+  --client-key ./deploy/pki/operator/admin.key \
   submit \
   --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
   --timeout 30 \
@@ -208,9 +210,9 @@ Query the task execution state using the returned `Task ID`:
 ```bash
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
-  --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/admin.crt \
-  --client-key ./deploy/pki/admin.key \
+  --ca-cert ./deploy/pki/runtime/ca.crt \
+  --client-cert ./deploy/pki/operator/admin.crt \
+  --client-key ./deploy/pki/operator/admin.key \
   status task_7e8b91c2_f024_4b89_8d11_0234a9b51e44
 ```
 

@@ -262,44 +262,114 @@ class PkiManager:
     def get_paths(self) -> Dict[str, Path]:
         """Returns standard certificate file paths within target directory."""
         return {
-            "ca_cert": self.pki_dir / "ca.crt",
-            "ca_key": self.pki_dir / "ca.key",
-            "server_cert": self.pki_dir / "server.crt",
-            "server_key": self.pki_dir / "server.key",
+            "ca_cert": self.pki_dir / "runtime" / "ca.crt",
+            "ca_key": self.pki_dir / "operator" / "ca.key",
+            "server_cert": self.pki_dir / "runtime" / "server.crt",
+            "server_key": self.pki_dir / "runtime" / "server.key",
             "client_cert": self.pki_dir / "client.crt",
             "client_key": self.pki_dir / "client.key",
-            "client_p12": self.pki_dir / "client.p12",
-            "admin_cert": self.pki_dir / "admin.crt",
-            "admin_key": self.pki_dir / "admin.key",
+            "admin_cert": self.pki_dir / "operator" / "admin.crt",
+            "admin_key": self.pki_dir / "operator" / "admin.key",
             "untrusted_cert": self.pki_dir / "untrusted_client.crt",
             "untrusted_key": self.pki_dir / "untrusted_client.key",
         }
 
+    def _resolve_cli_cmd(self) -> list[str]:
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+        for candidate in [
+            backend_dir / "target" / "release" / "androgrid-cli",
+            backend_dir / "target" / "release" / "androgrid-cli.exe",
+            backend_dir / "target" / "debug" / "androgrid-cli",
+            backend_dir / "target" / "debug" / "androgrid-cli.exe",
+        ]:
+            if candidate.exists():
+                return [str(candidate)]
+        return ["cargo", "run", "--quiet", "--bin", "androgrid-cli", "--"]
+
     def generate(self, node_id: str = "node_smoke_test_01", additional_san: Optional[str] = None):
-        """Invokes generate_cluster_pki.sh to produce valid and untrusted certificates."""
+        """Bootstraps cluster PKI via `androgrid-cli cert` and generates untrusted test fixtures."""
         self.pki_dir.mkdir(parents=True, exist_ok=True)
-        script = Path(__file__).resolve().parent.parent / "pki" / "generate_cluster_pki.sh"
+        cli_cmd = self._resolve_cli_cmd()
+        backend_dir = Path(__file__).resolve().parent.parent.parent
+        p = self.get_paths()
+        p["ca_cert"].parent.mkdir(parents=True, exist_ok=True)
+        p["ca_key"].parent.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            "bash",
-            str(script),
-            str(self.pki_dir),
-            node_id,
-            "androgrid_secure_pki"
-        ]
+        print(f"[*] Generating mTLS 1.3 PKI credentials via `androgrid-cli cert` in: {self.pki_dir}")
+        init_cmd = cli_cmd + ["cert", "init", "--out", str(self.pki_dir), "--force"]
         if additional_san:
-            cmd.append(additional_san)
-
-        print(f"[*] Generating mTLS 1.3 PKI credentials in: {self.pki_dir}")
-        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            init_cmd.extend(["--san", additional_san])
+        res = subprocess.run(init_cmd, cwd=str(backend_dir), capture_output=True, text=True, check=False)
         if res.returncode != 0:
-            # Fallback to python openssl invocation if bash script execution is restricted
-            print(f"[!] Warning: bash script returned non-zero ({res.returncode}), attempting direct generation...")
-            self._generate_direct(node_id, additional_san)
+            raise RuntimeError(
+                f"androgrid-cli cert init failed ({res.returncode}): {res.stderr.strip()}"
+            )
+
+        # Generate worker CSR + sign offline via `androgrid-cli cert issue csr`
+        subprocess.run(
+            ["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["client_key"])],
+            check=True,
+        )
+        client_csr = self.pki_dir / "client.csr"
+        subprocess.run(
+            ["openssl", "req", "-new", "-key", str(p["client_key"]), "-out", str(client_csr), "-subj", f"/CN={node_id}"],
+            check=True,
+        )
+        subprocess.run(
+            cli_cmd
+            + [
+                "cert",
+                "issue",
+                "csr",
+                "--csr",
+                str(client_csr),
+                "--node-id",
+                node_id,
+                "--ca-dir",
+                str(self.pki_dir),
+                "--out",
+                str(p["client_cert"]),
+                "--force",
+            ],
+            cwd=str(backend_dir),
+            check=True,
+        )
+        client_csr.unlink(missing_ok=True)
+        self._generate_untrusted_fixture()
+
+    def _generate_untrusted_fixture(self):
+        """Generates rogue untrusted CA and client cert for [INV-002] negative verification."""
+        p = self.get_paths()
+        p["ca_cert"].parent.mkdir(parents=True, exist_ok=True)
+        p["ca_key"].parent.mkdir(parents=True, exist_ok=True)
+        untrusted_ca_key = self.pki_dir / "untrusted_ca.key"
+        untrusted_ca_cert = self.pki_dir / "untrusted_ca.crt"
+        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(untrusted_ca_key)], check=True)
+        subprocess.run([
+            "openssl", "req", "-new", "-x509", "-sha256", "-key", str(untrusted_ca_key),
+            "-out", str(untrusted_ca_cert), "-days", "30",
+            "-subj", "/CN=Untrusted Rogue CA/O=Rogue Cluster/OU=Testing"
+        ], check=True)
+
+        subprocess.run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", str(p["untrusted_key"])], check=True)
+        untrusted_csr = self.pki_dir / "untrusted_client.csr"
+        subprocess.run([
+            "openssl", "req", "-new", "-key", str(p["untrusted_key"]),
+            "-out", str(untrusted_csr),
+            "-subj", "/CN=untrusted_worker/O=Rogue Worker/OU=Edge Compute"
+        ], check=True)
+        subprocess.run([
+            "openssl", "x509", "-req", "-in", str(untrusted_csr),
+            "-CA", str(untrusted_ca_cert), "-CAkey", str(untrusted_ca_key), "-CAcreateserial",
+            "-out", str(p["untrusted_cert"]), "-days", "30", "-sha256"
+        ], check=True)
+        untrusted_csr.unlink(missing_ok=True)
 
     def _generate_direct(self, node_id: str, additional_san: Optional[str] = None):
         """Direct OpenSSL generation fallback for environments without bash."""
         p = self.get_paths()
+        p["ca_cert"].parent.mkdir(parents=True, exist_ok=True)
+        p["ca_key"].parent.mkdir(parents=True, exist_ok=True)
         # 1. Root CA
         if not p["ca_key"].exists():
             subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["ca_key"])], check=True)

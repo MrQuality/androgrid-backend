@@ -63,10 +63,12 @@ openssl req -new -key client_node_pixel_7_01.key \
   -out client_node_pixel_7_01.csr \
   -subj "/CN=node_pixel_7_01/O=AndroGrid Worker/OU=Edge Compute"
 
-# 3. Sign the CSR with the cluster Root CA (valid for 365 days):
-openssl x509 -req -in client_node_pixel_7_01.csr \
-  -CA deploy/pki/ca.crt -CAkey deploy/pki/ca.key -CAcreateserial \
-  -out client_node_pixel_7_01.crt -days 365 -sha256
+# 3. Sign the CSR offline with `androgrid-cli cert issue csr` (or `openssl x509`):
+./target/release/androgrid-cli cert issue csr \
+  --csr client_node_pixel_7_01.csr \
+  --node-id node_pixel_7_01 \
+  --ca-dir deploy/pki \
+  --out client_node_pixel_7_01.crt
 
 # 4. Package the certificate, private key, and Root CA into an encrypted PKCS#12 bundle:
 # Note: Modern OpenSSL 3.x defaults to PBES2/AES-256 keybags which Android KeyStore fails to unwrap.
@@ -74,7 +76,7 @@ openssl x509 -req -in client_node_pixel_7_01.csr \
 openssl pkcs12 -export \
   -inkey client_node_pixel_7_01.key \
   -in client_node_pixel_7_01.crt \
-  -certfile deploy/pki/ca.crt \
+  -certfile deploy/pki/runtime/ca.crt \
   -out client.p12 \
   -certpbe PBE-SHA1-3DES \
   -keypbe PBE-SHA1-3DES \

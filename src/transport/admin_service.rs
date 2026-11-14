@@ -279,14 +279,9 @@ impl AdminService for AdminServiceImpl {
             .map_err(|e| Status::failed_precondition(e.to_string()))?;
 
         let cluster_endpoint = if !req.san.trim().is_empty() {
-            let host = req.san.trim();
-            if host.starts_with("http://") || host.starts_with("https://") {
-                host.to_string()
-            } else {
-                format!("https://{host}")
-            }
+            crate::pairing::strip_uri_scheme(&req.san)
         } else {
-            self.cluster_endpoint.clone()
+            crate::pairing::strip_uri_scheme(&self.cluster_endpoint)
         };
 
         let payload = PairingPayload {
@@ -456,9 +451,47 @@ mod tests {
         let inner = res.into_inner();
         assert_eq!(inner.node_id, "test-node-pair");
         assert_eq!(inner.ca_fingerprint, "fingerprint_12345");
-        assert_eq!(inner.cluster_endpoint, "https://192.168.1.100:50051");
+        assert_eq!(inner.cluster_endpoint, "192.168.1.100:50051");
         assert_eq!(inner.pairing_token.len(), 64);
         assert!(inner.pairing_payload_json.contains("test-node-pair"));
         assert!(inner.pairing_payload_json.contains(&inner.pairing_token));
+        assert!(!inner.pairing_payload_json.contains("https://"));
+    }
+
+    #[tokio::test]
+    async fn test_generate_pairing_token_strips_uri_scheme_from_san_and_default() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let token_store = Arc::new(PairingTokenStore::default());
+        let service = AdminServiceImpl::with_services(
+            scheduler,
+            artifact_store,
+            "http://127.0.0.1:8080".to_string(),
+            Arc::clone(&token_store),
+            "fp_abc".to_string(),
+            "https://10.0.0.1:50051".to_string(),
+        );
+
+        let res_default = service
+            .generate_pairing_token(Request::new(GeneratePairingTokenRequest {
+                node_id: "node-1".to_string(),
+                expires_in_seconds: 300,
+                san: "".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(res_default.cluster_endpoint, "10.0.0.1:50051");
+
+        let res_san = service
+            .generate_pairing_token(Request::new(GeneratePairingTokenRequest {
+                node_id: "node-2".to_string(),
+                expires_in_seconds: 300,
+                san: "https://192.168.1.42:50051".to_string(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(res_san.cluster_endpoint, "192.168.1.42:50051");
     }
 }

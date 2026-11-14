@@ -24,12 +24,25 @@ pub enum QrError {
     ImageSave { path: String, detail: String },
 }
 
+/// Strips `https://` or `http://` URI scheme prefixes and trailing slashes from an endpoint string
+/// so mobile gRPC channel builders receive a canonical `host:port` target.
+///
+/// Traces to: [REQ-OP-001], [INV-002]
+pub fn strip_uri_scheme(endpoint: &str) -> String {
+    let trimmed = endpoint.trim();
+    let without_scheme = trimmed
+        .strip_prefix("https://")
+        .or_else(|| trimmed.strip_prefix("http://"))
+        .unwrap_or(trimmed);
+    without_scheme.trim_end_matches('/').to_string()
+}
+
 /// Compact device pairing payload scanned by the Android worker.
 ///
 /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PairingPayload {
-    /// Control plane gRPC / HTTP enrollment endpoint URL.
+    /// Control plane gRPC enrollment endpoint in canonical `host:port` format (no URI scheme).
     pub cluster_endpoint: String,
 
     /// Lowercase hexadecimal SHA-256 fingerprint of the cluster Root CA certificate.
@@ -47,9 +60,17 @@ pub struct PairingPayload {
 }
 
 impl PairingPayload {
-    /// Serializes the pairing payload to a compact JSON string.
+    /// Serializes the pairing payload to a compact JSON string, normalizing `cluster_endpoint`
+    /// to canonical `host:port` format without URI scheme prefixes.
     pub fn to_compact_json(&self) -> Result<String, QrError> {
-        serde_json::to_string(self).map_err(|e| QrError::Serialization(e.to_string()))
+        let normalized = PairingPayload {
+            cluster_endpoint: strip_uri_scheme(&self.cluster_endpoint),
+            ca_fingerprint: self.ca_fingerprint.clone(),
+            pairing_token: self.pairing_token.clone(),
+            node_id: self.node_id.clone(),
+            expires_at_epoch_s: self.expires_at_epoch_s,
+        };
+        serde_json::to_string(&normalized).map_err(|e| QrError::Serialization(e.to_string()))
     }
 
     /// Deserializes a pairing payload from a JSON string.
@@ -117,7 +138,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pairing_payload_json_round_trip() {
+    fn test_pairing_payload_json_round_trip_strips_uri_scheme() {
         let payload = PairingPayload {
             cluster_endpoint: "https://192.168.1.50:50051".to_string(),
             ca_fingerprint: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -131,12 +152,22 @@ mod tests {
             .to_compact_json()
             .expect("Serialization must succeed");
         assert!(json.contains("cluster_endpoint"));
+        assert!(!json.contains("https://"));
+        assert!(json.contains("192.168.1.50:50051"));
         assert!(json.contains("ca_fingerprint"));
         assert!(json.contains("pairing_token"));
         assert!(json.contains("worker-node-alpha"));
 
         let deserialized = PairingPayload::from_json(&json).expect("Deserialization must succeed");
-        assert_eq!(payload, deserialized);
+        assert_eq!(deserialized.cluster_endpoint, "192.168.1.50:50051");
+        assert_eq!(deserialized.pairing_token, payload.pairing_token);
+    }
+
+    #[test]
+    fn test_strip_uri_scheme_normalizes_endpoints() {
+        assert_eq!(strip_uri_scheme("https://10.0.2.2:50051/"), "10.0.2.2:50051");
+        assert_eq!(strip_uri_scheme("http://127.0.0.1:50051"), "127.0.0.1:50051");
+        assert_eq!(strip_uri_scheme("  192.168.1.10:50051  "), "192.168.1.10:50051");
     }
 
     #[test]

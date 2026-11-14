@@ -77,6 +77,9 @@ openssl x509 -req -in "${OUTPUT_DIR}/server.csr" \
     -out "${OUTPUT_DIR}/server.crt" -days "${CLIENT_DAYS_VALID}" -sha256 \
     -extfile "${OUTPUT_DIR}/server_ext.cnf"
 
+# Bundle Root CA with leaf server certificate to form fullchain for mobile trust pinning
+cat "${OUTPUT_DIR}/ca.crt" >> "${OUTPUT_DIR}/server.crt"
+
 rm -f "${OUTPUT_DIR}/server.csr" "${OUTPUT_DIR}/server_ext.cnf"
 
 # 3. Generate Android Worker Client Certificate
@@ -134,7 +137,7 @@ echo "=========================================================="
 echo "PKI Generation Complete!"
 echo "Files generated in: ${OUTPUT_DIR}"
 echo "  - ca.crt       : Root CA Public Certificate"
-echo "  - server.crt   : Orchestrator TLS 1.3 Certificate"
+echo "  - server.crt   : Orchestrator TLS 1.3 Fullchain Certificate (Server + Root CA)"
 echo "  - server.key   : Orchestrator Private Key"
 echo "  - client.crt   : Worker TLS 1.3 Certificate"
 echo "  - client.key   : Worker Private Key"

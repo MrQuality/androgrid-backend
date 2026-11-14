@@ -4,6 +4,7 @@
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001]
 
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
+use tonic::{Request, Status};
 
 /// Constructs a ServerTlsConfig that enforces TLS 1.3 mutual authentication (mTLS).
 ///
@@ -24,6 +25,44 @@ pub fn build_server_mtls_config(
     ServerTlsConfig::new()
         .identity(identity)
         .client_ca_root(client_ca)
+}
+
+/// Constructs a ServerTlsConfig for a shared control-plane + bootstrap enrollment listener.
+///
+/// Enables `client_auth_optional(true)` so unprovisioned worker nodes can establish a
+/// Root-CA-pinned TLS 1.3 session to `EnrollmentService` without presenting a client
+/// certificate, while validated client certificates are still verified against `client_ca_pem`.
+/// Operational services hosted on the same listener MUST enforce client certificates via
+/// [`require_client_mtls_interceptor`].
+///
+/// Traces to: [REQ-OP-001], [INV-002], [NFR-SEC-001]
+pub fn build_server_bootstrap_tls_config(
+    server_cert_pem: &[u8],
+    server_key_pem: &[u8],
+    client_ca_pem: &[u8],
+) -> ServerTlsConfig {
+    let identity = Identity::from_pem(server_cert_pem, server_key_pem);
+    let client_ca = Certificate::from_pem(client_ca_pem);
+
+    ServerTlsConfig::new()
+        .identity(identity)
+        .client_ca_root(client_ca)
+        .client_auth_optional(true)
+}
+
+/// Tonic request interceptor enforcing that a peer presented a verified client mTLS certificate.
+///
+/// Used on operational (`AndroGridService`) and administrative (`AdminService`) endpoints when
+/// the shared listener runs with [`build_server_bootstrap_tls_config`].
+///
+/// Traces to: [INV-002], [NFR-SEC-001]
+pub fn require_client_mtls_interceptor(request: Request<()>) -> Result<Request<()>, Status> {
+    match request.peer_certs() {
+        Some(certs) if !certs.is_empty() => Ok(request),
+        _ => Err(Status::unauthenticated(
+            "Client mTLS certificate required [INV-002]",
+        )),
+    }
 }
 
 /// Constructs a ClientTlsConfig for worker nodes connecting via mTLS.

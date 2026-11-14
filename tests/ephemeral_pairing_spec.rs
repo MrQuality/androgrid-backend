@@ -16,11 +16,11 @@ use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::enrollment_service_client::EnrollmentServiceClient;
 use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
 use androgrid_backend::{
-    build_client_mtls_config, build_server_mtls_config, AdminServiceImpl, AndroGridServiceImpl,
-    ArtifactServer, ArtifactStore, CaSigner, ClusterScheduler, EnrollmentContext,
-    EnrollmentServiceImpl, ExecutionEngine, HttpEnrollRequest, HttpEnrollResponse,
-    NetworkTransportType, NodeCapabilities, PairingError, PairingTokenStore, RegisterNodeRequest,
-    SignerError, SyncNodeStateRequest,
+    build_client_mtls_config, build_server_bootstrap_tls_config, build_server_mtls_config,
+    require_client_mtls_interceptor, AdminServiceImpl, AndroGridServiceImpl, ArtifactServer,
+    ArtifactStore, CaSigner, ClusterScheduler, EnrollmentContext, EnrollmentServiceImpl,
+    ExecutionEngine, HttpEnrollRequest, HttpEnrollResponse, NetworkTransportType, NodeCapabilities,
+    PairingError, PairingTokenStore, RegisterNodeRequest, SignerError, SyncNodeStateRequest,
 };
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 
@@ -404,4 +404,125 @@ async fn test_live_grpc_enrollment_and_subsequent_mtls_registration() {
         .unwrap()
         .into_inner();
     assert!(sync_res.server_epoch_ms > 0);
+}
+
+#[tokio::test]
+async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_operational_mtls() {
+    let pki = TestClusterPki::generate();
+    let signer = Arc::new(CaSigner::from_pem(&pki.ca_cert_pem, &pki.ca_key_pem).unwrap());
+    let token_store = Arc::new(PairingTokenStore::default());
+    let scheduler = Arc::new(ClusterScheduler::new());
+
+    // Bundle fullchain (leaf + Root CA) just like generate_cluster_pki.sh (#41)
+    let fullchain_pem = format!("{}\n{}", pki.server_cert_pem, pki.ca_cert_pem);
+    let server_tls = build_server_bootstrap_tls_config(
+        fullchain_pem.as_bytes(),
+        pki.server_key_pem.as_bytes(),
+        pki.ca_cert_pem.as_bytes(),
+    );
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stream = TcpListenerStream::new(listener);
+
+    let andro_service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
+    let enrollment_service =
+        EnrollmentServiceImpl::new(Arc::clone(&token_store), Arc::clone(&signer));
+
+    tokio::spawn(async move {
+        Server::builder()
+            .tls_config(server_tls)
+            .unwrap()
+            .add_service(AndroGridServiceServer::with_interceptor(
+                andro_service,
+                require_client_mtls_interceptor,
+            ))
+            .add_service(EnrollmentServiceServer::new(enrollment_service))
+            .serve_with_incoming(stream)
+            .await
+            .unwrap();
+    });
+
+    let node_id = "worker-bootstrap-tls";
+    let token_record = token_store
+        .generate_token(Some(node_id.to_string()), Some(300))
+        .unwrap();
+    let (csr_pem, worker_key) = generate_client_csr(node_id);
+
+    // 1. Unprovisioned client (no client cert, only CA-pinned server verification)
+    let bootstrap_tls = tonic::transport::ClientTlsConfig::new()
+        .domain_name("localhost")
+        .ca_certificate(tonic::transport::Certificate::from_pem(
+            pki.ca_cert_pem.as_bytes(),
+        ));
+    let bootstrap_channel = tonic::transport::Endpoint::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(bootstrap_tls)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Bootstrap TLS 1.3 connection without client cert must succeed");
+
+    // 1a. Unauthenticated TLS client MUST be rejected by operational AndroGridService [INV-002]
+    let mut unauth_andro = AndroGridServiceClient::new(bootstrap_channel.clone());
+    let unauth_err = unauth_andro
+        .register_node(RegisterNodeRequest {
+            node_id: node_id.to_string(),
+            capabilities: None,
+            client_version: "0.1.0".to_string(),
+        })
+        .await
+        .expect_err("Unauthenticated operational RPC must be rejected");
+    assert_eq!(unauth_err.code(), tonic::Code::Unauthenticated);
+
+    // 1b. Unauthenticated TLS client CAN redeem pairing token via EnrollmentService (#40)
+    let mut enroll_client = EnrollmentServiceClient::new(bootstrap_channel);
+    let enroll_res = enroll_client
+        .enroll_worker(androgrid_backend::EnrollWorkerRequest {
+            pairing_token: token_record.token,
+            csr_pem,
+            node_id: node_id.to_string(),
+        })
+        .await
+        .expect("Bootstrap EnrollmentService RPC must succeed without client cert")
+        .into_inner();
+    assert!(!enroll_res.client_cert_pem.is_empty());
+
+    // 2. Provisioned client with issued mTLS certificate succeeds on AndroGridService
+    let client_tls = build_client_mtls_config(
+        enroll_res.client_cert_pem.as_bytes(),
+        worker_key.serialize_pem().as_bytes(),
+        enroll_res.ca_cert_pem.as_bytes(),
+        "localhost",
+    );
+    let mtls_channel = tonic::transport::Endpoint::from_shared(format!("https://{addr}"))
+        .unwrap()
+        .tls_config(client_tls)
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut authed_andro = AndroGridServiceClient::new(mtls_channel);
+    let reg_res = authed_andro
+        .register_node(RegisterNodeRequest {
+            node_id: node_id.to_string(),
+            capabilities: Some(NodeCapabilities {
+                is_rooted: false,
+                supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+                cpu_cores: 4,
+                total_ram_bytes: 4 * 1024 * 1024 * 1024,
+                os_version: "14".to_string(),
+                abi: "arm64-v8a".to_string(),
+                is_metered: false,
+                current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
+                max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 30,
+                thermal_status: 0,
+            }),
+            client_version: "0.1.0".to_string(),
+        })
+        .await
+        .expect("Authenticated mTLS operational RPC must succeed")
+        .into_inner();
+    assert!(!reg_res.session_token.is_empty());
 }

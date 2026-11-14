@@ -165,11 +165,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         artifact_addr = %config.artifact_listen_addr,
         "Starting embedded HTTP static artifact, pairing & real-time web dashboard server [NFR-PERF-001], [REQ-OP-001], [INV-004], [INV-005]"
     );
+    let http_enrollment_ctx = if mtls_enabled {
+        info!("mTLS enabled: plaintext HTTP /api/v1/enroll disabled (use gRPC over TLS 1.3)");
+        None
+    } else {
+        enrollment_ctx.clone()
+    };
     ArtifactServer::spawn_full(
         artifact_listener,
         Arc::clone(&artifact_store),
         Arc::clone(&scheduler),
-        enrollment_ctx.clone(),
+        http_enrollment_ctx,
         artifact_shutdown_rx,
     );
 

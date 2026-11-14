@@ -426,6 +426,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
     let stream = TcpListenerStream::new(listener);
 
     let andro_service = AndroGridServiceImpl::new(Arc::clone(&scheduler));
+    let admin_service = androgrid_backend::AdminServiceImpl::new(Arc::clone(&scheduler));
     let enrollment_service =
         EnrollmentServiceImpl::new(Arc::clone(&token_store), Arc::clone(&signer));
 
@@ -437,6 +438,12 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
                 andro_service,
                 require_client_mtls_interceptor,
             ))
+            .add_service(
+                androgrid_backend::proto::androgrid::v1::admin_service_server::AdminServiceServer::with_interceptor(
+                    admin_service,
+                    require_client_mtls_interceptor,
+                ),
+            )
             .add_service(EnrollmentServiceServer::new(enrollment_service))
             .serve_with_incoming(stream)
             .await
@@ -502,7 +509,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
         .connect()
         .await
         .unwrap();
-    let mut authed_andro = AndroGridServiceClient::new(mtls_channel);
+    let mut authed_andro = AndroGridServiceClient::new(mtls_channel.clone());
     let reg_res = authed_andro
         .register_node(RegisterNodeRequest {
             node_id: node_id.to_string(),
@@ -525,4 +532,38 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
         .expect("Authenticated mTLS operational RPC must succeed")
         .into_inner();
     assert!(!reg_res.session_token.is_empty());
+
+    // 4. Enrolled worker cert cannot impersonate another node_id [INV-002]
+    let spoof_err = authed_andro
+        .register_node(RegisterNodeRequest {
+            node_id: "impersonated-worker-node".to_string(),
+            capabilities: Some(NodeCapabilities {
+                is_rooted: false,
+                supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+                cpu_cores: 4,
+                total_ram_bytes: 4 * 1024 * 1024 * 1024,
+                os_version: "14".to_string(),
+                abi: "arm64-v8a".to_string(),
+                is_metered: false,
+                current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
+                max_cellular_task_duration_seconds: 180,
+                battery_temperature_celsius: 30,
+                thermal_status: 0,
+            }),
+            client_version: "0.1.0".to_string(),
+        })
+        .await
+        .expect_err("Worker cert must not impersonate another node_id");
+    assert_eq!(spoof_err.code(), tonic::Code::PermissionDenied);
+
+    // 5. Enrolled worker cert (OU=Edge Compute) cannot invoke AdminService [INV-002]
+    let mut authed_admin =
+        androgrid_backend::proto::androgrid::v1::admin_service_client::AdminServiceClient::new(
+            mtls_channel,
+        );
+    let admin_err = authed_admin
+        .list_worker_nodes(androgrid_backend::ListWorkerNodesRequest {})
+        .await
+        .expect_err("Worker cert must be denied on AdminService");
+    assert_eq!(admin_err.code(), tonic::Code::PermissionDenied);
 }

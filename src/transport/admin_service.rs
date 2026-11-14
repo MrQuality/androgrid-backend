@@ -12,6 +12,7 @@ use crate::admin_service_server::AdminService;
 use crate::artifact::ArtifactStore;
 use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
+use crate::transport::tls::AuthenticatedPeer;
 use crate::{
     CancelTaskRequest, CancelTaskResponse, GeneratePairingTokenRequest,
     GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTasksRequest,
@@ -81,6 +82,19 @@ impl AdminServiceImpl {
             cluster_endpoint,
         }
     }
+
+    /// Rejects worker client certificates (`OU = Edge Compute`) from calling
+    /// privileged operator endpoints on `AdminService`.
+    fn authorize_admin_peer<T>(request: &Request<T>) -> Result<(), Status> {
+        if let Some(peer) = request.extensions().get::<AuthenticatedPeer>() {
+            if peer.organizational_unit.as_deref() == Some("Edge Compute") {
+                return Err(Status::permission_denied(
+                    "Worker certificates (OU=Edge Compute) are not authorized for AdminService",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
@@ -92,6 +106,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<SubmitTaskRequest>,
     ) -> Result<Response<SubmitTaskResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task = req.task.ok_or_else(|| {
             Status::invalid_argument("task field is required in SubmitTaskRequest")
@@ -123,6 +138,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GetTaskStatusRequest>,
     ) -> Result<Response<GetTaskStatusResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task_id = req.task_id;
         if task_id.is_empty() {
@@ -165,8 +181,9 @@ impl AdminService for AdminServiceImpl {
     /// Traces to: [REQ-OP-001]
     async fn list_worker_nodes(
         &self,
-        _request: Request<ListWorkerNodesRequest>,
+        request: Request<ListWorkerNodesRequest>,
     ) -> Result<Response<ListWorkerNodesResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let nodes = self.scheduler.list_worker_nodes();
         Ok(Response::new(ListWorkerNodesResponse { nodes }))
     }
@@ -178,6 +195,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<ListTasksRequest>,
     ) -> Result<Response<ListTasksResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let state_filter = if req.state_filter == 0 {
             None
@@ -195,6 +213,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<CancelTaskRequest>,
     ) -> Result<Response<CancelTaskResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let task_id = req.task_id;
         if task_id.is_empty() {
@@ -225,6 +244,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<UploadArtifactRequest>,
     ) -> Result<Response<UploadArtifactResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
         let bytecode = req.bytecode;
         if bytecode.is_empty() {
@@ -260,6 +280,7 @@ impl AdminService for AdminServiceImpl {
         &self,
         request: Request<GeneratePairingTokenRequest>,
     ) -> Result<Response<GeneratePairingTokenResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
         if self.ca_fingerprint.is_empty() {
             return Err(Status::failed_precondition(
                 "Root CA signer is not initialized; pairing enrollment is unavailable (check ANDROGRID_CA_KEY_PATH)",

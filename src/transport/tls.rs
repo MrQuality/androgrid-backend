@@ -52,17 +52,60 @@ pub fn build_server_bootstrap_tls_config(
 
 /// Tonic request interceptor enforcing that a peer presented a verified client mTLS certificate.
 ///
+/// Verified X.509 Subject identity extracted from the peer's mTLS leaf certificate.
+///
+/// Traces to: [INV-002], [NFR-SEC-001]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedPeer {
+    /// Subject Common Name (`CN`), bound to `node_id` for worker certificates.
+    pub common_name: Option<String>,
+    /// Subject Organizational Unit (`OU`), used to distinguish workers (`Edge Compute`)
+    /// from operators (`Control Plane`).
+    pub organizational_unit: Option<String>,
+}
+
+/// Tonic request interceptor rejecting calls that did not present an mTLS client certificate
+/// and attaching [`AuthenticatedPeer`] metadata to the request extensions.
+///
 /// Used on operational (`AndroGridService`) and administrative (`AdminService`) endpoints when
 /// the shared listener runs with [`build_server_bootstrap_tls_config`].
 ///
 /// Traces to: [INV-002], [NFR-SEC-001]
-pub fn require_client_mtls_interceptor(request: Request<()>) -> Result<Request<()>, Status> {
-    match request.peer_certs() {
-        Some(certs) if !certs.is_empty() => Ok(request),
-        _ => Err(Status::unauthenticated(
-            "Client mTLS certificate required [INV-002]",
-        )),
-    }
+pub fn require_client_mtls_interceptor(mut request: Request<()>) -> Result<Request<()>, Status> {
+    let peer = match request.peer_certs() {
+        Some(certs) if !certs.is_empty() => parse_leaf_identity(certs[0].as_ref())?,
+        _ => {
+            return Err(Status::unauthenticated(
+                "Client mTLS certificate required [INV-002]",
+            ))
+        }
+    };
+    request.extensions_mut().insert(peer);
+    Ok(request)
+}
+
+fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der)
+        .map_err(|e| Status::unauthenticated(format!("Invalid client X.509 certificate: {e}")))?;
+
+    let common_name = cert
+        .subject()
+        .iter_common_name()
+        .next()
+        .and_then(|attr| attr.as_str().ok())
+        .map(str::to_string);
+
+    let organizational_unit = cert
+        .subject()
+        .iter_organizational_unit()
+        .next()
+        .and_then(|attr| attr.as_str().ok())
+        .map(str::to_string);
+
+    Ok(AuthenticatedPeer {
+        common_name,
+        organizational_unit,
+    })
 }
 
 /// Constructs a ClientTlsConfig for worker nodes connecting via mTLS.

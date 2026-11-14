@@ -133,7 +133,7 @@ If camera scanning is not possible (e.g. emulators or headless test fixtures), m
 openssl pkcs12 -export \
   -inkey client_node.key \
   -in client_node.crt \
-  -certfile deploy/pki/ca.crt \
+  -certfile deploy/pki/runtime/ca.crt \
   -out client.p12 \
   -certpbe PBE-SHA1-3DES \
   -keypbe PBE-SHA1-3DES \

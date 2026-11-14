@@ -767,10 +767,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let sha256_hex = meta.artifact_sha256;
 
-                    // Automatic registration with orchestrator if artifact_url is not explicitly provided
-                    let final_url = if let Some(url) = artifact_url {
-                        url
-                    } else if !inline {
+                    // External HTTP artifact_url is deprecated; workers resolve artifacts via mTLS FetchArtifact
+                    if artifact_url.is_some() {
+                        return Err(
+                            "--artifact-url is deprecated and unsupported: omit --artifact-url so the CLI uploads the module via UploadArtifact for mTLS FetchArtifact resolution (or pass --inline for small payloads)".into()
+                        );
+                    }
+                    let final_url = if !inline {
                         // Register artifact with orchestrator over AdminService channel [NFR-PERF-001], [REQ-OP-003]
                         let upload_res = client
                             .upload_artifact(UploadArtifactRequest {

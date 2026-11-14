@@ -27,6 +27,7 @@ pub struct AndroGridServiceImpl {
 
 impl AndroGridServiceImpl {
     /// Creates a new service instance bound to the provided scheduler.
+    #[deprecated(note = "Use with_artifact_store to share the orchestrator ArtifactStore")]
     pub fn new(scheduler: Arc<ClusterScheduler>) -> Self {
         Self {
             scheduler,
@@ -174,6 +175,14 @@ impl AndroGridService for AndroGridServiceImpl {
         &self,
         request: Request<FetchArtifactRequest>,
     ) -> Result<Response<FetchArtifactResponse>, Status> {
+        let req_node_id = request.get_ref().node_id.trim().to_string();
+        if req_node_id.is_empty() {
+            return Err(Status::invalid_argument(
+                "node_id must not be empty in FetchArtifactRequest",
+            ));
+        }
+        Self::verify_peer_identity(&request, &req_node_id)?;
+
         let req = request.into_inner();
         let clean_sha = req.artifact_sha256.trim().to_ascii_lowercase();
         if clean_sha.len() != 64 || !clean_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -191,11 +200,12 @@ impl AndroGridService for AndroGridServiceImpl {
                 ))
             })?;
 
-        validate_frame_bound(wasm_bytecode.len())?;
-
-        Ok(Response::new(FetchArtifactResponse {
+        let response = FetchArtifactResponse {
             wasm_bytecode,
             artifact_sha256: clean_sha,
-        }))
+        };
+        validate_frame_bound(prost::Message::encoded_len(&response))?;
+
+        Ok(Response::new(response))
     }
 }

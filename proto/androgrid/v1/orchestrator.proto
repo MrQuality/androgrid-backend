@@ -122,6 +122,7 @@ message TaskSpec {
   string shell_command = 8;
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
+  // Deprecated: workers resolve content-addressed artifacts via FetchArtifact over mTLS 50051.
   string artifact_url = 11;
 }
 
@@ -350,6 +351,7 @@ message ListTasksResponse {
 // Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
 message FetchArtifactRequest {
   string artifact_sha256 = 1;
+  string node_id = 2;
 }
 
 // Response containing the verified WebAssembly bytecode for a requested SHA-256 digest.

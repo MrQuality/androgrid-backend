@@ -616,6 +616,7 @@ mod tests {
         let fetched = svc
             .fetch_artifact(Request::new(FetchArtifactRequest {
                 artifact_sha256: sha256.clone(),
+                node_id: "node-test-01".to_string(),
             }))
             .await
             .expect("FetchArtifact must return stored bytecode")
@@ -626,6 +627,7 @@ mod tests {
         let not_found = svc
             .fetch_artifact(Request::new(FetchArtifactRequest {
                 artifact_sha256: "b".repeat(64),
+                node_id: "node-test-01".to_string(),
             }))
             .await
             .expect_err("Unknown sha256 must return NotFound");
@@ -634,9 +636,42 @@ mod tests {
         let invalid = svc
             .fetch_artifact(Request::new(FetchArtifactRequest {
                 artifact_sha256: "../etc/passwd".to_string(),
+                node_id: "node-test-01".to_string(),
             }))
             .await
             .expect_err("Invalid sha256 must return InvalidArgument");
         assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
+
+        let empty_node = svc
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                artifact_sha256: sha256,
+                node_id: String::new(),
+            }))
+            .await
+            .expect_err("Empty node_id must return InvalidArgument");
+        assert_eq!(empty_node.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_fetch_artifact_rejects_oversized_envelope() {
+        use crate::andro_grid_service_server::AndroGridService;
+        use crate::transport::service::AndroGridServiceImpl;
+        use crate::{FetchArtifactRequest, MAX_FRAME_SIZE_BYTES};
+
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        // Exact MAX_FRAME_SIZE_BYTES raw bytecode exceeds 16 MB once protobuf framing + sha256 are encoded
+        let exact_limit_bytes = vec![0x61u8; MAX_FRAME_SIZE_BYTES];
+        let sha256 = artifact_store.store_artifact(&exact_limit_bytes).unwrap();
+
+        let svc = AndroGridServiceImpl::with_artifact_store(scheduler, artifact_store);
+        let err = svc
+            .fetch_artifact(Request::new(FetchArtifactRequest {
+                artifact_sha256: sha256,
+                node_id: "node-test-01".to_string(),
+            }))
+            .await
+            .expect_err("16 MB payload + protobuf framing must be rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 }

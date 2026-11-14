@@ -17,6 +17,7 @@ use tonic::transport::{Channel, Server};
 
 use androgrid_backend::andro_grid_service_client::AndroGridServiceClient;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
+use androgrid_backend::artifact::store::ArtifactStore;
 use androgrid_backend::{
     build_client_mtls_config, build_server_mtls_config, AndroGridServiceImpl, ClusterScheduler,
     ExecutionEngine, NetworkTransportType, NodeCapabilities, RegisterNodeRequest,
@@ -106,6 +107,7 @@ impl TestPki {
 /// Helper to spin up a live Tonic mTLS server on an ephemeral loopback port.
 async fn spawn_live_mtls_server(
     scheduler: Arc<ClusterScheduler>,
+    artifact_store: Arc<ArtifactStore>,
     pki: &TestPki,
 ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -116,7 +118,7 @@ async fn spawn_live_mtls_server(
     let server_tls =
         build_server_mtls_config(&pki.server_cert_pem, &pki.server_key_pem, &pki.ca_cert_pem);
 
-    let service = AndroGridServiceImpl::new(scheduler);
+    let service = AndroGridServiceImpl::with_artifact_store(scheduler, artifact_store);
     let server = Server::builder()
         .tls_config(server_tls)
         .expect("Failed to configure server TLS")
@@ -155,9 +157,11 @@ async fn connect_live_mtls_client(
 async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
     let pki = TestPki::generate();
     let scheduler = Arc::new(ClusterScheduler::new());
+    let artifact_store = Arc::new(ArtifactStore::new());
 
     // Spawn live mTLS server
-    let (addr, _server_handle) = spawn_live_mtls_server(Arc::clone(&scheduler), &pki).await;
+    let (addr, _server_handle) =
+        spawn_live_mtls_server(Arc::clone(&scheduler), Arc::clone(&artifact_store), &pki).await;
 
     // Connect valid mTLS client
     let mut client = connect_live_mtls_client(
@@ -343,7 +347,8 @@ async fn spike_live_grpc_mtls_rejects_untrusted_client_certificate() {
     let scheduler = Arc::new(ClusterScheduler::new());
 
     // Spawn live mTLS server requiring client certificates signed by pki.ca_cert_pem
-    let (addr, _server_handle) = spawn_live_mtls_server(scheduler, &pki).await;
+    let (addr, _server_handle) =
+        spawn_live_mtls_server(scheduler, Arc::new(ArtifactStore::new()), &pki).await;
 
     // Connect with rogue client cert (signed by an untrusted rogue CA)
     let rogue_client_res = connect_live_mtls_client(
@@ -376,4 +381,47 @@ async fn spike_live_grpc_mtls_rejects_untrusted_client_certificate() {
     }
 
     println!("Live mTLS Security Spike: Untrusted rogue client successfully rejected by TLS 1.3.");
+}
+
+#[tokio::test]
+async fn spike_live_mtls_fetch_artifact_e2e() {
+    use androgrid_backend::FetchArtifactRequest;
+
+    let pki = TestPki::generate();
+    let scheduler = Arc::new(ClusterScheduler::new());
+    let artifact_store = Arc::new(ArtifactStore::new());
+    let wasm_bytes = b"\x00asm\x01\x00\x00\x00".to_vec();
+    let sha256 = artifact_store.store_artifact(&wasm_bytes).unwrap();
+
+    let (addr, _server_handle) =
+        spawn_live_mtls_server(scheduler, Arc::clone(&artifact_store), &pki).await;
+
+    let mut client = connect_live_mtls_client(
+        addr,
+        &pki.client_cert_pem,
+        &pki.client_key_pem,
+        &pki.ca_cert_pem,
+    )
+    .await
+    .expect("Valid mTLS client must connect for FetchArtifact");
+
+    let fetched = client
+        .fetch_artifact(FetchArtifactRequest {
+            artifact_sha256: sha256.clone(),
+            node_id: "pixel8-worker-01".to_string(),
+        })
+        .await
+        .expect("FetchArtifact must succeed over mTLS 1.3")
+        .into_inner();
+    assert_eq!(fetched.wasm_bytecode, wasm_bytes);
+    assert_eq!(fetched.artifact_sha256, sha256);
+
+    let missing = client
+        .fetch_artifact(FetchArtifactRequest {
+            artifact_sha256: "c".repeat(64),
+            node_id: "pixel8-worker-01".to_string(),
+        })
+        .await
+        .expect_err("Missing artifact must return NotFound");
+    assert_eq!(missing.code(), tonic::Code::NotFound);
 }

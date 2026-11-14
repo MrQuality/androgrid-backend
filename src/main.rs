@@ -16,8 +16,8 @@ use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
 use androgrid_backend::{
     build_server_bootstrap_tls_config, require_client_mtls_interceptor, AdminServiceImpl,
-    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, ClusterConfig,
-    ClusterScheduler, EnrollmentContext, EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
+    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, ClusterConfig, ClusterScheduler,
+    EnrollmentContext, EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]

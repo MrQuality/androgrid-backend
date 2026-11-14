@@ -165,9 +165,18 @@ mod tests {
 
     #[test]
     fn test_strip_uri_scheme_normalizes_endpoints() {
-        assert_eq!(strip_uri_scheme("https://10.0.2.2:50051/"), "10.0.2.2:50051");
-        assert_eq!(strip_uri_scheme("http://127.0.0.1:50051"), "127.0.0.1:50051");
-        assert_eq!(strip_uri_scheme("  192.168.1.10:50051  "), "192.168.1.10:50051");
+        assert_eq!(
+            strip_uri_scheme("https://10.0.2.2:50051/"),
+            "10.0.2.2:50051"
+        );
+        assert_eq!(
+            strip_uri_scheme("http://127.0.0.1:50051"),
+            "127.0.0.1:50051"
+        );
+        assert_eq!(
+            strip_uri_scheme("  192.168.1.10:50051  "),
+            "192.168.1.10:50051"
+        );
     }
 
     #[test]

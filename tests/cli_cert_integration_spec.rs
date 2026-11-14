@@ -184,3 +184,147 @@ fn test_cli_cert_offline_lifecycle_and_json_output() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[tokio::test]
+async fn test_generated_pki_completes_live_mtls_handshake() {
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio_stream::wrappers::TcpListenerStream;
+    use tonic::transport::{Channel, Server};
+
+    use androgrid_backend::admin_service_client::AdminServiceClient;
+    use androgrid_backend::admin_service_server::AdminServiceServer;
+    use androgrid_backend::pairing::pki::{
+        cert_init, cert_issue_csr, CaSource, PkiInitConfig, PkiIssueCsrConfig,
+    };
+    use androgrid_backend::{
+        build_client_mtls_config, build_server_mtls_config, AdminServiceImpl, ClusterScheduler,
+        ListWorkerNodesRequest,
+    };
+
+    let root = temp_dir("mtls_handshake");
+    cert_init(&PkiInitConfig {
+        out_dir: root.clone(),
+        extra_sans: vec![],
+        no_default_sans: false,
+        ca_days: 365,
+        days: 30,
+        admin_cn: "operator-test".to_string(),
+        force: false,
+    })
+    .unwrap();
+
+    // Also issue a worker cert from a CSR
+    let mut csr_params = CertificateParams::default();
+    csr_params
+        .distinguished_name
+        .push(DnType::CommonName, "node_live_mtls_01");
+    let worker_key = KeyPair::generate().unwrap();
+    let csr_pem = csr_params
+        .serialize_request(&worker_key)
+        .unwrap()
+        .pem()
+        .unwrap();
+    let csr_path = root.join("worker.csr");
+    fs::write(&csr_path, csr_pem).unwrap();
+    let worker_cert_path = root.join("worker.crt");
+    cert_issue_csr(&PkiIssueCsrConfig {
+        ca_source: CaSource::Dir(root.clone()),
+        csr_path,
+        node_id: "node_live_mtls_01".to_string(),
+        out_path: worker_cert_path.clone(),
+        ca_out_path: None,
+        days: 30,
+        force: false,
+    })
+    .unwrap();
+
+    let ca_pem = fs::read(root.join("runtime/ca.crt")).unwrap();
+    let server_cert = fs::read(root.join("runtime/server.crt")).unwrap();
+    let server_key = fs::read(root.join("runtime/server.key")).unwrap();
+    let admin_cert = fs::read(root.join("operator/admin.crt")).unwrap();
+    let admin_key = fs::read(root.join("operator/admin.key")).unwrap();
+    let worker_cert = fs::read(&worker_cert_path).unwrap();
+    let worker_key_pem = worker_key.serialize_pem().into_bytes();
+
+    let server_tls = build_server_mtls_config(&server_cert, &server_key, &ca_pem);
+    let scheduler = Arc::new(ClusterScheduler::new());
+    let admin_service = AdminServiceImpl::new(scheduler);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let incoming = TcpListenerStream::new(listener);
+
+    let server_handle = tokio::spawn(async move {
+        Server::builder()
+            .tls_config(server_tls)
+            .unwrap()
+            .add_service(AdminServiceServer::new(admin_service))
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+
+    let endpoint_uri = format!("https://127.0.0.1:{}", addr.port());
+
+    // 1. Operator cert (OU=Control Plane) completes mTLS handshake and passes RBAC
+    let admin_tls = build_client_mtls_config(&admin_cert, &admin_key, &ca_pem, "localhost");
+    let admin_channel = Channel::from_shared(endpoint_uri.clone())
+        .unwrap()
+        .tls_config(admin_tls)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Admin mTLS handshake must succeed");
+    let mut admin_client = AdminServiceClient::new(admin_channel);
+    let resp = admin_client
+        .list_worker_nodes(ListWorkerNodesRequest {})
+        .await
+        .expect("AdminService with operator cert must succeed");
+    assert!(resp.into_inner().nodes.is_empty());
+
+    // 2. CSR-signed worker cert (OU=Edge Compute) also completes the mTLS handshake
+    let worker_tls = build_client_mtls_config(&worker_cert, &worker_key_pem, &ca_pem, "localhost");
+    let worker_channel = Channel::from_shared(endpoint_uri.clone())
+        .unwrap()
+        .tls_config(worker_tls)
+        .unwrap()
+        .connect()
+        .await
+        .expect("Worker mTLS handshake must succeed");
+    let mut worker_client = AdminServiceClient::new(worker_channel);
+    worker_client
+        .list_worker_nodes(ListWorkerNodesRequest {})
+        .await
+        .expect("Worker cert must be accepted by server mTLS trust store");
+
+    // 3. Untrusted self-signed client cert must be rejected by server mTLS
+    let rogue_key = KeyPair::generate().unwrap();
+    let rogue_params = CertificateParams::new(vec!["rogue".to_string()]).unwrap();
+    let rogue_cert = rogue_params.self_signed(&rogue_key).unwrap();
+    let rogue_tls = build_client_mtls_config(
+        rogue_cert.pem().as_bytes(),
+        rogue_key.serialize_pem().as_bytes(),
+        &ca_pem,
+        "localhost",
+    );
+    let rogue_channel = Channel::from_shared(endpoint_uri)
+        .unwrap()
+        .tls_config(rogue_tls)
+        .unwrap()
+        .connect()
+        .await;
+    if let Ok(ch) = rogue_channel {
+        let mut rogue_client = AdminServiceClient::new(ch);
+        assert!(
+            rogue_client
+                .list_worker_nodes(ListWorkerNodesRequest {})
+                .await
+                .is_err(),
+            "Untrusted client cert must be rejected by mTLS"
+        );
+    }
+
+    server_handle.abort();
+    let _ = fs::remove_dir_all(&root);
+}

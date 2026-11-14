@@ -11,6 +11,9 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TMP_FILE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose,
@@ -139,15 +142,27 @@ pub fn cert_init(config: &PkiInitConfig) -> Result<PkiOperationSummary, PkiError
     validate_days(config.ca_days, "ca-days")?;
     validate_days(config.days, "days")?;
     validate_non_empty_cn(&config.admin_cn, "admin-cn")?;
+    build_server_sans(&config.extra_sans, config.no_default_sans)?;
 
     let runtime_dir = config.out_dir.join("runtime");
     let operator_dir = config.out_dir.join("operator");
 
     let ca_cert_path = runtime_dir.join("ca.crt");
     let ca_key_path = operator_dir.join("ca.key");
+    let server_cert_path = runtime_dir.join("server.crt");
+    let server_key_path = runtime_dir.join("server.key");
+    let admin_cert_path = operator_dir.join("admin.crt");
+    let admin_key_path = operator_dir.join("admin.key");
 
     if !config.force {
-        for protected in [&ca_cert_path, &ca_key_path] {
+        for protected in [
+            &ca_cert_path,
+            &ca_key_path,
+            &server_cert_path,
+            &server_key_path,
+            &admin_cert_path,
+            &admin_key_path,
+        ] {
             if protected.exists() {
                 return Err(PkiError::AlreadyExists {
                     path: protected.display().to_string(),
@@ -536,6 +551,7 @@ fn build_server_sans(
         if let Ok(ip) = entry.parse::<IpAddr>() {
             san_types.push(SanType::IpAddress(ip));
         } else {
+            validate_dns_san(entry)?;
             let dns = Ia5String::try_from(entry.as_str()).map_err(|e| {
                 PkiError::InvalidArgument(format!("Invalid DNS SAN '{entry}': {e}"))
             })?;
@@ -544,6 +560,50 @@ fn build_server_sans(
     }
 
     Ok((san_types, ordered))
+}
+
+fn validate_dns_san(entry: &str) -> Result<(), PkiError> {
+    if entry.contains("://")
+        || entry.contains('/')
+        || entry.contains(':')
+        || entry.chars().any(char::is_whitespace)
+    {
+        return Err(PkiError::InvalidArgument(format!(
+            "Invalid DNS SAN '{entry}': expected a bare hostname or IP address without scheme, port, path, or whitespace"
+        )));
+    }
+
+    let host = entry.strip_prefix("*.").unwrap_or(entry);
+    if host.is_empty() || host.len() > 253 {
+        return Err(PkiError::InvalidArgument(format!(
+            "Invalid DNS SAN '{entry}': hostname length must be between 1 and 253 characters"
+        )));
+    }
+
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.iter().all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit())) {
+        return Err(PkiError::InvalidArgument(format!(
+            "Invalid SAN '{entry}': appears to be a malformed IP address"
+        )));
+    }
+
+    for label in labels {
+        let bytes = label.as_bytes();
+        if bytes.is_empty()
+            || bytes.len() > 63
+            || bytes.first() == Some(&b'-')
+            || bytes.last() == Some(&b'-')
+            || !bytes
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'-')
+        {
+            return Err(PkiError::InvalidArgument(format!(
+                "Invalid DNS SAN '{entry}': labels must contain only ASCII letters, digits, or internal hyphens"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 fn build_validity_window(
@@ -609,10 +669,11 @@ fn write_file_atomic(
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or("artifact");
-    let tmp_path = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let seq = TMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = parent.join(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
 
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
 
     #[cfg(unix)]
     {
@@ -888,6 +949,163 @@ mod tests {
 
         assert!(build_server_sans(&[], true).is_err());
         assert!(validate_node_id("bad node id").is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_cert_init_preflight_leaves_no_partial_files_on_san_error() {
+        let dir = temp_test_dir("preflight");
+        let err = cert_init(&PkiInitConfig {
+            out_dir: dir.clone(),
+            extra_sans: vec![],
+            no_default_sans: true,
+            ca_days: 1825,
+            days: 365,
+            admin_cn: "operator".to_string(),
+            force: false,
+        })
+        .expect_err("Missing SAN with --no-default-sans must fail preflight");
+        assert!(matches!(err, PkiError::InvalidArgument(_)));
+        assert!(!dir.join("runtime/ca.crt").exists());
+        assert!(!dir.join("operator/ca.key").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_server_sans_rejects_malformed_ips_and_urls() {
+        for bad in [
+            "192.168.1.999",
+            "https://192.168.1.50:50051",
+            "orchestrator:50051",
+            "bad host",
+            "*.",
+            "-bad.example.com",
+            "bad..example.com",
+        ] {
+            assert!(
+                build_server_sans(&[bad.to_string()], true).is_err(),
+                "Expected invalid SAN '{bad}' to be rejected"
+            );
+        }
+
+        let (sans, ordered) = build_server_sans(
+            &[
+                "*.androgrid.example".to_string(),
+                "orchestrator".to_string(),
+                "10.0.2.2".to_string(),
+            ],
+            true,
+        )
+        .expect("Valid SANs must be accepted");
+        assert_eq!(sans.len(), 3);
+        assert_eq!(
+            ordered,
+            vec!["*.androgrid.example", "orchestrator", "10.0.2.2"]
+        );
+    }
+
+    #[test]
+    fn test_cert_issue_refuses_overwrite_without_force() {
+        let dir = temp_test_dir("issue_overwrite");
+        cert_init(&PkiInitConfig {
+            out_dir: dir.clone(),
+            extra_sans: vec![],
+            no_default_sans: false,
+            ca_days: 1825,
+            days: 365,
+            admin_cn: "operator".to_string(),
+            force: false,
+        })
+        .unwrap();
+
+        let srv_err = cert_issue_server(&PkiIssueServerConfig {
+            ca_source: CaSource::Dir(dir.clone()),
+            out_dir: dir.join("runtime"),
+            extra_sans: vec![],
+            no_default_sans: false,
+            days: 90,
+            force: false,
+        })
+        .expect_err("server overwrite without --force must fail");
+        assert!(matches!(srv_err, PkiError::AlreadyExists { .. }));
+
+        let adm_err = cert_issue_admin(&PkiIssueAdminConfig {
+            ca_source: CaSource::Dir(dir.clone()),
+            out_dir: dir.join("operator"),
+            cn: "operator".to_string(),
+            days: 90,
+            force: false,
+        })
+        .expect_err("admin overwrite without --force must fail");
+        assert!(matches!(adm_err, PkiError::AlreadyExists { .. }));
+
+        let mut csr_params = CertificateParams::default();
+        csr_params
+            .distinguished_name
+            .push(DnType::CommonName, "node_pixel_overwrite");
+        let worker_key = KeyPair::generate().unwrap();
+        let csr_pem = csr_params.serialize_request(&worker_key).unwrap().pem().unwrap();
+        let csr_path = dir.join("worker.csr");
+        fs::write(&csr_path, csr_pem).unwrap();
+
+        let out_cert = dir.join("worker.crt");
+        let csr_cfg = PkiIssueCsrConfig {
+            ca_source: CaSource::Dir(dir.clone()),
+            csr_path,
+            node_id: "node_pixel_overwrite".to_string(),
+            out_path: out_cert,
+            ca_out_path: None,
+            days: 90,
+            force: false,
+        };
+        cert_issue_csr(&csr_cfg).unwrap();
+        let csr_err = cert_issue_csr(&csr_cfg)
+            .expect_err("csr cert overwrite without --force must fail");
+        assert!(matches!(csr_err, PkiError::AlreadyExists { .. }));
+
+        let mut forced_csr = csr_cfg;
+        forced_csr.force = true;
+        cert_issue_csr(&forced_csr).expect("csr cert overwrite with --force must succeed");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_generated_cert_validity_windows() {
+        let dir = temp_test_dir("validity");
+        cert_init(&PkiInitConfig {
+            out_dir: dir.clone(),
+            extra_sans: vec![],
+            no_default_sans: false,
+            ca_days: 1000,
+            days: 120,
+            admin_cn: "operator".to_string(),
+            force: false,
+        })
+        .unwrap();
+
+        let assert_span = |pem_str: &str, expected_days: i64| {
+            let block = pem::parse_many(pem_str)
+                .unwrap()
+                .into_iter()
+                .find(|p| p.tag() == "CERTIFICATE")
+                .unwrap();
+            let (_, cert) = x509_parser::parse_x509_certificate(block.contents()).unwrap();
+            let validity = cert.validity();
+            let span_secs = validity.not_after.timestamp() - validity.not_before.timestamp();
+            // 5-minute backdate (300s) + expected_days * 86400
+            let expected_secs = expected_days * 86400 + 300;
+            assert!(
+                (span_secs - expected_secs).abs() <= 5,
+                "Expected ~{expected_secs}s validity span, got {span_secs}s"
+            );
+        };
+
+        assert_span(&fs::read_to_string(dir.join("runtime/ca.crt")).unwrap(), 1000);
+        assert_span(&fs::read_to_string(dir.join("runtime/server.crt")).unwrap(), 120);
+        assert_span(&fs::read_to_string(dir.join("operator/admin.crt")).unwrap(), 120);
 
         let _ = fs::remove_dir_all(&dir);
     }

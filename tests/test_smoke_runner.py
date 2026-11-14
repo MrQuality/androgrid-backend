@@ -110,12 +110,15 @@ class TestPkiManager(unittest.TestCase):
     def test_pki_paths(self):
         pki = PkiManager(pki_dir=Path("/tmp/pki_test"))
         paths = pki.get_paths()
-        self.assertEqual(paths["ca_cert"], Path("/tmp/pki_test/ca.crt"))
-        self.assertEqual(paths["server_cert"], Path("/tmp/pki_test/server.crt"))
-        self.assertEqual(paths["server_key"], Path("/tmp/pki_test/server.key"))
+        self.assertEqual(paths["ca_cert"], Path("/tmp/pki_test/runtime/ca.crt"))
+        self.assertEqual(paths["server_cert"], Path("/tmp/pki_test/runtime/server.crt"))
+        self.assertEqual(paths["server_key"], Path("/tmp/pki_test/runtime/server.key"))
+        self.assertEqual(paths["admin_cert"], Path("/tmp/pki_test/operator/admin.crt"))
+        self.assertEqual(paths["admin_key"], Path("/tmp/pki_test/operator/admin.key"))
         self.assertEqual(paths["client_cert"], Path("/tmp/pki_test/client.crt"))
         self.assertEqual(paths["client_key"], Path("/tmp/pki_test/client.key"))
         self.assertEqual(paths["untrusted_cert"], Path("/tmp/pki_test/untrusted_client.crt"))
+        self.assertNotIn("client_p12", paths)
 
 
 class TestSmokeTestRunnerLifecycle(unittest.TestCase):
@@ -153,9 +156,9 @@ class TestSmokeTestRunnerLifecycle(unittest.TestCase):
         ]
         summary = self.runner.poll_task_completion(
             task_id="task_1",
-            ca_cert=Path("pki/ca.crt"),
-            client_cert=Path("pki/client.crt"),
-            client_key=Path("pki/client.key"),
+            ca_cert=Path("pki/runtime/ca.crt"),
+            client_cert=Path("pki/operator/admin.crt"),
+            client_key=Path("pki/operator/admin.key"),
             max_attempts=5,
             poll_interval=0.01
         )

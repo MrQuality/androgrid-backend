@@ -1679,7 +1679,7 @@ mod tests {
             None,
         )
         .expect("Env CA cert must not break --ca-dir");
-        assert!(matches!(dir_src, CaSource::Dir(p) if p == PathBuf::from("/tmp/pki")));
+        assert!(matches!(dir_src, CaSource::Dir(p) if p == Path::new("/tmp/pki")));
 
         // 3. Combining --ca-dir and --ca-key must fail
         let conflict = resolve_ca_source(

@@ -581,7 +581,10 @@ fn validate_dns_san(entry: &str) -> Result<(), PkiError> {
     }
 
     let labels: Vec<&str> = host.split('.').collect();
-    if labels.iter().all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit())) {
+    if labels
+        .iter()
+        .all(|l| !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()))
+    {
         return Err(PkiError::InvalidArgument(format!(
             "Invalid SAN '{entry}': appears to be a malformed IP address"
         )));
@@ -1046,7 +1049,11 @@ mod tests {
             .distinguished_name
             .push(DnType::CommonName, "node_pixel_overwrite");
         let worker_key = KeyPair::generate().unwrap();
-        let csr_pem = csr_params.serialize_request(&worker_key).unwrap().pem().unwrap();
+        let csr_pem = csr_params
+            .serialize_request(&worker_key)
+            .unwrap()
+            .pem()
+            .unwrap();
         let csr_path = dir.join("worker.csr");
         fs::write(&csr_path, csr_pem).unwrap();
 
@@ -1061,8 +1068,8 @@ mod tests {
             force: false,
         };
         cert_issue_csr(&csr_cfg).unwrap();
-        let csr_err = cert_issue_csr(&csr_cfg)
-            .expect_err("csr cert overwrite without --force must fail");
+        let csr_err =
+            cert_issue_csr(&csr_cfg).expect_err("csr cert overwrite without --force must fail");
         assert!(matches!(csr_err, PkiError::AlreadyExists { .. }));
 
         let mut forced_csr = csr_cfg;
@@ -1103,9 +1110,18 @@ mod tests {
             );
         };
 
-        assert_span(&fs::read_to_string(dir.join("runtime/ca.crt")).unwrap(), 1000);
-        assert_span(&fs::read_to_string(dir.join("runtime/server.crt")).unwrap(), 120);
-        assert_span(&fs::read_to_string(dir.join("operator/admin.crt")).unwrap(), 120);
+        assert_span(
+            &fs::read_to_string(dir.join("runtime/ca.crt")).unwrap(),
+            1000,
+        );
+        assert_span(
+            &fs::read_to_string(dir.join("runtime/server.crt")).unwrap(),
+            120,
+        );
+        assert_span(
+            &fs::read_to_string(dir.join("operator/admin.crt")).unwrap(),
+            120,
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

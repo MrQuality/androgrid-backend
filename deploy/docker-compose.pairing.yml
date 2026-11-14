@@ -10,4 +10,5 @@ services:
       - ANDROGRID_ALLOW_PAIRING=true
       - ANDROGRID_CA_KEY_PATH=/etc/androgrid/ca-key/ca.key
     volumes:
-      - ./pki/operator/ca.key:/etc/androgrid/ca-key/ca.key:ro
+      # Rootful Docker runs as UID 10001 (androgrid); ensure ca.key is owned by 10001:10001 with 0600 mode
+      - ./pki/operator/ca.key:/etc/androgrid/ca-key/ca.key:ro,Z

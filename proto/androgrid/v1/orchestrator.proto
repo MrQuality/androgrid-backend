@@ -22,6 +22,10 @@ service AndroGridService {
 
   // Traces to: [REQ-OP-004], [INV-004], [NFR-REL-001]
   rpc SubmitCellularResult(SubmitCellularResultRequest) returns (SubmitCellularResultResponse);
+
+  // Content-addressed WASM artifact retrieval over the authenticated mTLS 1.3 channel.
+  // Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+  rpc FetchArtifact(FetchArtifactRequest) returns (FetchArtifactResponse);
 }
 
 // AdminService provides administrative control, task submission, and cluster observability
@@ -118,7 +122,8 @@ message TaskSpec {
   string shell_command = 8;
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
-  string artifact_url = 11;
+  // Deprecated: workers resolve content-addressed artifacts via FetchArtifact over mTLS 50051.
+  string artifact_url = 11 [deprecated = true];
 }
 
 // Unary request to claim a spot task over cellular WAN.
@@ -340,6 +345,20 @@ message TaskInfo {
 // Traces to: [REQ-OP-004]
 message ListTasksResponse {
   repeated TaskInfo tasks = 1;
+}
+
+// Request to retrieve a cached WebAssembly artifact by SHA-256 content address over mTLS.
+// Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+message FetchArtifactRequest {
+  string artifact_sha256 = 1;
+  string node_id = 2;
+}
+
+// Response containing the verified WebAssembly bytecode for a requested SHA-256 digest.
+// Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
+message FetchArtifactResponse {
+  bytes wasm_bytecode = 1;
+  string artifact_sha256 = 2;
 }
 
 

@@ -301,6 +301,7 @@ impl BenchmarkDispatcher {
             env_vars.insert("TILE_INDEX".to_string(), tile.tile_index.to_string());
             env_vars.insert("TOTAL_TILES".to_string(), total_tiles.to_string());
 
+            #[allow(deprecated)]
             let task_spec = TaskSpec {
                 task_id: task_id.clone(),
                 run_attempt: 1,

@@ -190,7 +190,7 @@ Submit the task to the cluster queue:
 #### What Happens Under the Hood:
 1. **SHA-256 Digesting:** The CLI computes the cryptographic SHA-256 checksum of the WASM bytecode.
 2. **Content-Addressed Registration:** The bytecode is uploaded to the orchestrator artifact store via `AdminService.UploadArtifact`.
-3. **Decoupled Task Dispatch:** The CLI dispatches a lightweight `SubmitTaskRequest` (under 1 KB) referencing `artifact_sha256` and `artifact_url`. This guarantees that cellular worker leases remain sub-4KB, preserving baseband radio sleep deadlines (`[NFR-POW-001]`).
+3. **Decoupled Task Dispatch:** The CLI dispatches a lightweight `SubmitTaskRequest` (under 1 KB) referencing `artifact_sha256`. Workers retrieve the verified bytecode via `AndroGridService.FetchArtifact` over the same authenticated mTLS 1.3 channel (`50051`), preserving sub-4KB leases and baseband radio sleep deadlines (`[NFR-POW-001]`).
 
 Output:
 ```text

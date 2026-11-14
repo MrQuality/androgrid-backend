@@ -110,7 +110,7 @@ Traceability: `[REQ-OP-003]`, `[INV-004]`, `[INV-005]`, `[NFR-POW-001]`, `[NFR-P
 | `--root` | Boolean Flag | No | `false` | Grants root execution privileges. Requires `--shell`. Only executed by rooted worker nodes (`[INV-006]`). |
 | `--timeout <SECS>` | Integer | No | `30` | Maximum allowed runtime in seconds before the orchestrator triggers task timeout. |
 | `--requires-unmetered` | Boolean Flag | No | `false` | When enabled, prevents scheduling to cellular workers (`[ANTI-003]`). Restricts to Wi-Fi nodes. |
-| `--artifact-url <URL>` | String | No | None | Explicit HTTP/HTTPS pre-cached URL for artifact download by mobile clients. |
+| `--artifact-url <URL>` | String | No | None | **Deprecated:** Rejected by the CLI. Omit this flag so bytecode is uploaded via `UploadArtifact` and resolved by workers over mTLS `FetchArtifact`. |
 | `--env <KEY=VALUE>` | Key-Value Pair | No | Empty | Environment variables provided to the runtime environment. Can be specified multiple times. |
 
 #### Example Invocation: Standard WASM Submission

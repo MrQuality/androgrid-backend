@@ -137,7 +137,7 @@ message TaskSpec {
   string shell_command = 8;
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
-  string artifact_url = 11;
+  string artifact_url = 11 [deprecated = true];
 }
 ```
 

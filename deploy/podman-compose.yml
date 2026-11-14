@@ -13,6 +13,7 @@ services:
       dockerfile: Containerfile
     container_name: androgrid-orchestrator
     restart: unless-stopped
+    userns_mode: "keep-id:uid=10001,gid=10001"
     ports:
       - "50051:50051"
     environment:

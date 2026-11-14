@@ -59,8 +59,10 @@ deploy/pki/
 |-- ca.key          # Root CA private key (kept secret on the host control plane, chmod 600)
 |-- server.crt      # Host Orchestrator server certificate with SANs (localhost, 127.0.0.1)
 |-- server.key      # Host Orchestrator private key for TLS 1.3 termination
-|-- client.crt      # Worker/Operator client certificate for Mutual TLS authentication
-|-- client.key      # Worker/Operator client private key
+|-- admin.crt       # Operator Admin client certificate (OU=Control Plane)
+|-- admin.key       # Operator Admin private key
+|-- client.crt      # Worker client certificate for Mutual TLS authentication (OU=Edge Compute)
+|-- client.key      # Worker client private key
 `-- client.p12      # Encrypted PKCS#12 archive for Android KeyStore provisioning
 ```
 
@@ -126,16 +128,16 @@ Execute the `nodes` subcommand to inspect the cluster inventory:
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
   --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/client.crt \
-  --client-key ./deploy/pki/client.key \
+  --client-cert ./deploy/pki/admin.crt \
+  --client-key ./deploy/pki/admin.key \
   nodes
 ```
 
 #### Detailed Flag Breakdown:
 - `--endpoint https://127.0.0.1:50051`: Specifies the HTTPS/gRPC URL of the control plane orchestrator.
 - `--ca-cert ./deploy/pki/ca.crt`: Supplies the internal Root CA certificate to validate the server certificate.
-- `--client-cert ./deploy/pki/client.crt`: Supplies the operator client certificate to authenticate against the orchestrator.
-- `--client-key ./deploy/pki/client.key`: Supplies the operator private key for TLS 1.3 client proof of possession.
+- `--client-cert ./deploy/pki/admin.crt`: Supplies the operator client certificate (`OU=Control Plane`) to authenticate against `AdminService`.
+- `--client-key ./deploy/pki/admin.key`: Supplies the operator private key for TLS 1.3 client proof of possession.
 - `nodes`: The command to list all registered worker nodes.
 
 #### Expected Output:
@@ -175,8 +177,8 @@ Submit the task to the cluster queue:
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
   --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/client.crt \
-  --client-key ./deploy/pki/client.key \
+  --client-cert ./deploy/pki/admin.crt \
+  --client-key ./deploy/pki/admin.key \
   submit \
   --wasm ./workloads/wasi-starter/target/wasm32-wasip1/release/wasi_starter.wasm \
   --timeout 30 \
@@ -207,8 +209,8 @@ Query the task execution state using the returned `Task ID`:
 ./target/release/androgrid-cli \
   --endpoint https://127.0.0.1:50051 \
   --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/client.crt \
-  --client-key ./deploy/pki/client.key \
+  --client-cert ./deploy/pki/admin.crt \
+  --client-key ./deploy/pki/admin.key \
   status task_7e8b91c2_f024_4b89_8d11_0234a9b51e44
 ```
 

@@ -147,8 +147,8 @@ Test the ingress tunnel from a remote network using `androgrid-cli`:
 androgrid-cli \
   --endpoint https://grpc.cluster.domain.com \
   --ca-cert ./deploy/pki/ca.crt \
-  --client-cert ./deploy/pki/client.crt \
-  --client-key ./deploy/pki/client.key \
+  --client-cert ./deploy/pki/admin.crt \
+  --client-key ./deploy/pki/admin.key \
   nodes
 ```
 

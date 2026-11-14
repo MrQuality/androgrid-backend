@@ -38,6 +38,12 @@ if [ ! -f "${OUTPUT_DIR}/ca.key" ]; then
         -addext "keyUsage=critical,digitalSignature,keyCertSign,cRLSign"
 else
     echo "[*] Existing Root CA found; reusing ${OUTPUT_DIR}/ca.crt"
+    if ! grep -q "BEGIN PRIVATE KEY" "${OUTPUT_DIR}/ca.key"; then
+        echo "[*] Converting legacy SEC1 ca.key to PKCS#8 PEM format..."
+        openssl pkcs8 -topk8 -nocrypt -in "${OUTPUT_DIR}/ca.key" -out "${OUTPUT_DIR}/ca.key.pkcs8"
+        chmod 600 "${OUTPUT_DIR}/ca.key.pkcs8"
+        mv "${OUTPUT_DIR}/ca.key.pkcs8" "${OUTPUT_DIR}/ca.key"
+    fi
 fi
 
 # 2. Generate Orchestrator Server Certificate

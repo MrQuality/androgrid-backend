@@ -269,6 +269,8 @@ class PkiManager:
             "client_cert": self.pki_dir / "client.crt",
             "client_key": self.pki_dir / "client.key",
             "client_p12": self.pki_dir / "client.p12",
+            "admin_cert": self.pki_dir / "admin.crt",
+            "admin_key": self.pki_dir / "admin.key",
             "untrusted_cert": self.pki_dir / "untrusted_client.crt",
             "untrusted_key": self.pki_dir / "untrusted_client.key",
         }
@@ -365,6 +367,25 @@ class PkiManager:
         ], check=True)
         client_csr.unlink(missing_ok=True)
         client_ext.unlink(missing_ok=True)
+
+        # 3b. Operator Admin Key & Cert (OU=Control Plane)
+        subprocess.run(["openssl", "genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out", str(p["admin_key"])], check=True)
+        admin_csr = self.pki_dir / "admin.csr"
+        subprocess.run([
+            "openssl", "req", "-new", "-key", str(p["admin_key"]),
+            "-out", str(admin_csr),
+            "-subj", "/CN=operator/O=AndroGrid Cluster/OU=Control Plane"
+        ], check=True)
+        admin_ext = self.pki_dir / "admin_ext.cnf"
+        admin_ext.write_text("basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\nextendedKeyUsage = clientAuth\n")
+        subprocess.run([
+            "openssl", "x509", "-req", "-in", str(admin_csr),
+            "-CA", str(p["ca_cert"]), "-CAkey", str(p["ca_key"]), "-CAcreateserial",
+            "-out", str(p["admin_cert"]), "-days", "365", "-sha256",
+            "-extfile", str(admin_ext)
+        ], check=True)
+        admin_csr.unlink(missing_ok=True)
+        admin_ext.unlink(missing_ok=True)
 
         # 4. Rogue Untrusted Client for [INV-002] Verification
         untrusted_ca_key = self.pki_dir / "untrusted_ca.key"
@@ -700,8 +721,8 @@ class SmokeTestRunner:
                 res = self.execute_cli([
                     "--endpoint", f"https://127.0.0.1:{self.config.port}",
                     "--ca-cert", str(paths["ca_cert"]),
-                    "--client-cert", str(paths["client_cert"]),
-                    "--client-key", str(paths["client_key"]),
+                    "--client-cert", str(paths["admin_cert"]),
+                    "--client-key", str(paths["admin_key"]),
                     "nodes"
                 ])
                 if res.returncode == 0 and ("node_" in res.stdout or "worker" in res.stdout):
@@ -725,8 +746,8 @@ class SmokeTestRunner:
             submit_res = self.execute_cli([
                 "--endpoint", f"https://127.0.0.1:{self.config.port}",
                 "--ca-cert", str(paths["ca_cert"]),
-                "--client-cert", str(paths["client_cert"]),
-                "--client-key", str(paths["client_key"]),
+                "--client-cert", str(paths["admin_cert"]),
+                "--client-key", str(paths["admin_key"]),
                 "submit",
                 "--task-id", task_id,
                 "--wasm", str(wasm_file)
@@ -739,8 +760,8 @@ class SmokeTestRunner:
             task_summary = self.poll_task_completion(
                 task_id=task_id,
                 ca_cert=paths["ca_cert"],
-                client_cert=paths["client_cert"],
-                client_key=paths["client_key"]
+                client_cert=paths["admin_cert"],
+                client_key=paths["admin_key"]
             )
             print(f"[+] Task finished with state: {task_summary.state}, exit code: {task_summary.exit_code}")
 

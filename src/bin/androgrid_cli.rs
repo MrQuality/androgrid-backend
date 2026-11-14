@@ -773,19 +773,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "--artifact-url is deprecated and unsupported: omit --artifact-url so the CLI uploads the module via UploadArtifact for mTLS FetchArtifact resolution (or pass --inline for small payloads)".into()
                         );
                     }
-                    let final_url = if !inline {
+                    if !inline {
                         // Register artifact with orchestrator over AdminService channel [NFR-PERF-001], [REQ-OP-003]
-                        let upload_res = client
+                        client
                             .upload_artifact(UploadArtifactRequest {
                                 bytecode: bytecode.clone(),
                                 expected_sha256: sha256_hex.clone(),
                             })
-                            .await?
-                            .into_inner();
-                        upload_res.artifact_url
-                    } else {
-                        String::new()
-                    };
+                            .await?;
+                    }
 
                     let effective_bytecode = if inline {
                         bytecode
@@ -798,7 +794,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         effective_bytecode,
                         String::new(),
                         sha256_hex,
-                        final_url,
+                        String::new(),
                     )
                 } else if let Some(cmd) = shell {
                     let engine = if root {
@@ -815,6 +811,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let env_vars: HashMap<String, String> = env.into_iter().collect();
 
+            #[allow(deprecated)]
             let task_spec = TaskSpec {
                 task_id: actual_task_id.clone(),
                 run_attempt: 1,

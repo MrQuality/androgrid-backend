@@ -954,6 +954,7 @@ mod tests {
         }
     }
 
+    #[allow(deprecated)]
     fn make_test_task(
         task_id: &str,
         timeout_seconds: u32,

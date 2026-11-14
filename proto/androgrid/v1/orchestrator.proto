@@ -123,7 +123,7 @@ message TaskSpec {
   string artifact_sha256 = 9;
   bool requires_unmetered = 10;
   // Deprecated: workers resolve content-addressed artifacts via FetchArtifact over mTLS 50051.
-  string artifact_url = 11;
+  string artifact_url = 11 [deprecated = true];
 }
 
 // Unary request to claim a spot task over cellular WAN.

@@ -2306,4 +2306,79 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn test_group_cli_validation_and_status_include_tasks() {
+        assert!(Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "submit",
+            "--group-id",
+            "g1",
+            "--partitions",
+            "0",
+            "--shell",
+            "echo hi"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "replace",
+            "--group-id",
+            "g1",
+            "--partitions",
+            "1001",
+            "--shell",
+            "echo hi"
+        ])
+        .is_err());
+
+        assert_eq!(
+            parse_group_state_filter(None).unwrap(),
+            TaskGroupState::Unspecified as i32
+        );
+        assert_eq!(
+            parse_group_state_filter(Some("ACTIVE")).unwrap(),
+            TaskGroupState::Active as i32
+        );
+        assert!(parse_group_state_filter(Some("running")).is_err());
+
+        let status_res = androgrid_backend::GetTaskGroupStatusResponse {
+            group_id: "g1".to_string(),
+            current_epoch: 2,
+            state: TaskGroupState::Draining as i32,
+            total_tasks: 2,
+            pending_tasks: 1,
+            leased_tasks: 0,
+            running_tasks: 1,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            timed_out_tasks: 0,
+            cancelled_tasks: 0,
+            preempted_tasks: 0,
+            previous_epoch_draining_tasks: 1,
+            tasks: vec![androgrid_backend::TaskInfo {
+                task_id: "g1:e2:p0".to_string(),
+                state: TaskState::Running as i32,
+                run_attempt: 1,
+                assigned_node_id: "wifi-1".to_string(),
+                exit_code: 0,
+                execution_duration_ms: 42,
+                error_message: String::new(),
+                ..Default::default()
+            }],
+        };
+
+        let json_out = format_group_status_output(&status_res, true, "json");
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(parsed["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["tasks"][0]["task_id"], "g1:e2:p0");
+
+        let text_out = format_group_status_output(&status_res, true, "text");
+        assert!(text_out.contains("running=1"));
+        assert!(text_out.contains("timed_out=0"));
+        assert!(text_out.contains("preempted=0"));
+        assert!(text_out.contains("g1:e2:p0 [RUNNING]"));
+    }
 }

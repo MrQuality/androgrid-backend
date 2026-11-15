@@ -1459,7 +1459,10 @@ fn validate_partitions(partitions: &[TaskPartitionSpec]) -> Result<(), Schedulin
 
 fn validate_task_template(template: &TaskTemplate) -> Result<(), SchedulingError> {
     let engine = ExecutionEngine::try_from(template.engine).map_err(|_| {
-        SchedulingError::InvalidTaskTemplate(format!("unknown execution engine {}", template.engine))
+        SchedulingError::InvalidTaskTemplate(format!(
+            "unknown execution engine {}",
+            template.engine
+        ))
     })?;
     match engine {
         ExecutionEngine::WasmWasi => {}
@@ -2419,5 +2422,251 @@ mod tests {
         let st = scheduler.get_task_group_status("valid-id", false).unwrap();
         assert_eq!(st.state, TaskGroupState::Cancelled as i32);
         assert_eq!(st.cancelled_tasks, 1);
+    }
+
+    #[test]
+    fn test_task_group_drain_stays_draining_until_epoch1_finishes() {
+        let scheduler = ClusterScheduler::new();
+        let wifi = scheduler
+            .register_node(
+                "wifi-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "drain-order".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+
+        let sync1 = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 1000)
+            .unwrap();
+        assert_eq!(sync1.desired_tasks[0].task_id, "drain-order:e1:p0");
+
+        let rep = scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "drain-order".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"b".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Drain as i32,
+                },
+                2000,
+            )
+            .unwrap();
+        assert_eq!(rep.state, TaskGroupState::Draining as i32);
+
+        // Wi-Fi worker claims and completes epoch 2 while epoch 1 is still LEASED.
+        let sync2 = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 2000)
+            .unwrap();
+        assert_eq!(sync2.desired_tasks[0].task_id, "drain-order:e2:p0");
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "drain-order:e2:p0".to_string(),
+                    run_attempt: sync2.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 10,
+                }],
+                3000,
+            )
+            .unwrap();
+
+        // Must remain Draining while epoch 1 task is still non-terminal.
+        let mid = scheduler
+            .get_task_group_status("drain-order", false)
+            .unwrap();
+        assert_eq!(mid.state, TaskGroupState::Draining as i32);
+        assert_eq!(mid.previous_epoch_draining_tasks, 1);
+
+        // Once epoch 1 finishes, group transitions to Completed.
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "drain-order:e1:p0".to_string(),
+                    run_attempt: sync1.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 10,
+                }],
+                4000,
+            )
+            .unwrap();
+        let done = scheduler
+            .get_task_group_status("drain-order", false)
+            .unwrap();
+        assert_eq!(done.state, TaskGroupState::Completed as i32);
+        assert_eq!(done.previous_epoch_draining_tasks, 0);
+    }
+
+    #[test]
+    fn test_task_group_validation_guards_and_error_parity() {
+        let scheduler = ClusterScheduler::new();
+
+        // Invalid TaskTemplate: engine=Unspecified, timeout=0, empty shell_command
+        let mut bad_engine = make_group_template(&"a".repeat(64));
+        bad_engine.engine = ExecutionEngine::Unspecified as i32;
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-tpl".to_string(),
+                    template: Some(bad_engine),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        let mut bad_timeout = make_group_template(&"a".repeat(64));
+        bad_timeout.timeout_seconds = 0;
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-to".to_string(),
+                    template: Some(bad_timeout),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-shell".to_string(),
+                    template: Some(TaskTemplate {
+                        engine: ExecutionEngine::ToyboxUser as i32,
+                        timeout_seconds: 30,
+                        shell_command: "   ".to_string(),
+                        ..Default::default()
+                    }),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        // Standalone submit_task rejects reserved <group>:e<epoch>:p<index> IDs.
+        assert!(matches!(
+            scheduler.submit_task(TaskSpec {
+                task_id: "grp:e1:p0".to_string(),
+                engine: ExecutionEngine::WasmWasi as i32,
+                timeout_seconds: 30,
+                ..Default::default()
+            }),
+            Err(SchedulingError::TaskIdCollision(_))
+        ));
+
+        // Group-owned tasks reject individual cancel_task and return TaskCancelled on late cellular submit.
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "grp-guard".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+        assert!(matches!(
+            scheduler.cancel_task("grp-guard:e1:p0"),
+            Err(SchedulingError::InvalidStateTransition { .. })
+        ));
+
+        scheduler
+            .cancel_task_group("grp-guard", Some(1), 2000)
+            .unwrap();
+        assert!(matches!(
+            scheduler.submit_cellular_result(&crate::SubmitCellularResultRequest {
+                node_id: "cell-1".to_string(),
+                task_id: "grp-guard:e1:p0".to_string(),
+                run_attempt: 1,
+                exit_code: 0,
+                ..Default::default()
+            }),
+            Err(SchedulingError::TaskCancelled(_))
+        ));
+
+        let snap = scheduler.get_snapshot();
+        assert_eq!(snap.metrics.cancelled_tasks, 1);
+        assert_eq!(snap.tasks[0].state, "Cancelled");
+
+        // Replace on Completed group is rejected consistently with GroupTerminal.
+        let wifi = scheduler
+            .register_node(
+                "wifi-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "grp-done".to_string(),
+                    template: Some(make_group_template(&"c".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+        let sync_done = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 1000)
+            .unwrap();
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "grp-done:e1:p0".to_string(),
+                    run_attempt: sync_done.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: Vec::new(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 5,
+                }],
+                2000,
+            )
+            .unwrap();
+        assert!(matches!(
+            scheduler.replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "grp-done".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"d".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                3000,
+            ),
+            Err(SchedulingError::GroupTerminal(_))
+        ));
     }
 }

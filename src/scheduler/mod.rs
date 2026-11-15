@@ -14,5 +14,5 @@ pub use engine::{
     MAX_CELLULAR_DURATION_SECONDS, MIN_CELLULAR_BATTERY_PCT,
 };
 pub use errors::SchedulingError;
-pub use state::{TaskExecutionResult, TaskRecord, WorkerRecord};
+pub use state::{TaskExecutionResult, TaskGroupRecord, TaskRecord, WorkerRecord};
 pub use thermal::{ThermalAction, ThermalPolicy};

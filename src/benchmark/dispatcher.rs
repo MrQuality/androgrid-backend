@@ -314,6 +314,8 @@ impl BenchmarkDispatcher {
                 artifact_sha256: compute_sha256_hex(&tile.payload_bytes),
                 requires_unmetered: self.config.requires_unmetered,
                 artifact_url: artifact_url.clone(),
+                group_id: String::new(),
+                group_epoch: 0,
             };
 
             total_transferred += tile.payload_bytes.len();

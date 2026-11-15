@@ -5,7 +5,7 @@ Accepted
 
 ## Architectural Scope & Requirements
 - **Feature Reference:** Issue #12
-- **GitHub Issue:** https://github.com/MrQuality/androgrid-backend/issues/12
+- **GitHub Issue:** https://github.com/ligature-platform/androgrid-backend/issues/12
 - **Traceability:** `[REQ-OP-001]`, `[REQ-OP-004]`, `[NFR-SEC-001]`, `[NFR-PERF-001]`
 - **Standard:** ISO/IEC/IEEE 29148
 
@@ -42,7 +42,7 @@ We implement automated cross-platform release pipelines in `.github/workflows/re
 4. **Consolidated SHA-256 Digest Ledger:**
    - A dedicated aggregation job downloads all platform archives, computes SHA-256 digests, publishes `SHA256SUMS.txt`, and validates consistency before creating the GitHub Release.
 5. **Multi-Arch OCI Publishing with Buildx:**
-   - Uses Docker Buildx with QEMU emulation to compile and push multi-architecture (`linux/amd64`, `linux/arm64`) container images to `ghcr.io/mrquality/androgrid-backend`.
+   - Uses Docker Buildx with QEMU emulation to compile and push multi-architecture (`linux/amd64`, `linux/arm64`) container images to `ghcr.io/ligature-platform/androgrid-backend`.
    - Embeds standard OpenContainers metadata and semver tags.
 
 ---

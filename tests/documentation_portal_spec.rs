@@ -178,9 +178,9 @@ fn test_android_worker_chapters_and_dokka_cross_links() {
     let arch_content = fs::read_to_string(&arch_path).expect("Failed to read architecture.md");
 
     assert!(
-        guide_content.contains("https://mrquality.github.io/androgrid-android/dokka/index.html")
+        guide_content.contains("https://ligature-platform.github.io/androgrid-android/dokka/index.html")
     );
-    assert!(arch_content.contains("https://mrquality.github.io/androgrid-android/dokka/index.html"));
+    assert!(arch_content.contains("https://ligature-platform.github.io/androgrid-android/dokka/index.html"));
 }
 
 /// Validates that the Workload Developer Guide covers multi-language WASI compilation,

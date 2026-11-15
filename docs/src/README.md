@@ -61,4 +61,4 @@ The AndroGrid codebase maintains strict bidirectional traceability to ISO/IEC/IE
 - **[Architecture Decision Records](adr/ADR-001-mutual-tls-1.3-ecdsa-p256.md):** Architectural decisions and engineering rationales across control plane and feature architecture.
 - **[Ecosystem Architecture & Overview](showcase/ecosystem.md):** System component mapping across control plane, android client, and system specification.
 - **[Mobile Cluster Economics & Battery FAQ](showcase/economics_faq.md):** Empirical battery health, thermal hysteresis, and efficiency analysis.
-- **[Interactive Android Dokka API](https://mrquality.github.io/androgrid-android/dokka/index.html):** Full Kotlin KDoc API documentation and symbol browser on GitHub Pages.
+- **[Interactive Android Dokka API](https://ligature-platform.github.io/androgrid-android/dokka/index.html):** Full Kotlin KDoc API documentation and symbol browser on GitHub Pages.

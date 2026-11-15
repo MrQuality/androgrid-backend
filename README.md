@@ -109,7 +109,7 @@ See [workloads/wasi-starter](workloads/wasi-starter/README.md) for a complete st
 ### Building from Source
 ```bash
 # Clone the repository
-git clone https://github.com/MrQuality/androgrid-backend.git
+git clone https://github.com/ligature-platform/androgrid-backend.git
 cd androgrid-backend
 
 # Build release binary

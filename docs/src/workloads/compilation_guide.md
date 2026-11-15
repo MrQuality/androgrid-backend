@@ -9,7 +9,7 @@ Traceability: `[REQ-OP-004]`, `[INV-006]`, `[REQ-PUB-001]`, `[NFR-PERF-001]`, `[
 ## Important Notice: Interim Toolchain Workflow
 
 <div class="callout callout-warning">
-  <strong>Interim Development Step:</strong> The manual compiler invocations documented below represent an interim workflow while the automated build engine is undergoing formal architecture review. A comprehensive build harness (<code>androgrid-cli build</code>) that compiles source directories automatically inside rootless Podman containers is currently tracked in <a href="https://github.com/MrQuality/androgrid-backend/issues/22" target="_blank">RFC Issue #22 &nearr;</a>. Until that engine is released, use the language-specific recipes below to emit your <code>.wasm</code> payloads.
+  <strong>Interim Development Step:</strong> The manual compiler invocations documented below represent an interim workflow while the automated build engine is undergoing formal architecture review. A comprehensive build harness (<code>androgrid-cli build</code>) that compiles source directories automatically inside rootless Podman containers is currently tracked in <a href="https://github.com/ligature-platform/androgrid-backend/issues/22" target="_blank">RFC Issue #22 &nearr;</a>. Until that engine is released, use the language-specific recipes below to emit your <code>.wasm</code> payloads.
 </div>
 
 ---

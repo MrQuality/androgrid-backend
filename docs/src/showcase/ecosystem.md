@@ -63,7 +63,7 @@ flowchart TD
 ## 2. Core Repository Mapping
 
 ### Pillar 1: Host Control Plane (`androgrid-backend`)
-- **Primary Repository:** [github.com/MrQuality/androgrid-backend](https://github.com/MrQuality/androgrid-backend)
+- **Primary Repository:** [github.com/ligature-platform/androgrid-backend](https://github.com/ligature-platform/androgrid-backend)
 - **Role:** High-concurrency task orchestrator, scheduling coordinator, artifact distributor, and operator CLI.
 - **Technology Stack:** Rust 1.82+, Tokio 1.40 asynchronous runtime, Tonic 0.12 gRPC framework, Rustls mutual TLS 1.3, and Ratatui terminal dashboard.
 - **Key Modules:**
@@ -74,7 +74,7 @@ flowchart TD
 - **Documentation:** [System Architecture Overview](../architecture/system_overview.md) and [Operator Manual](../operator/cli_manual.md).
 
 ### Pillar 2: Mobile Worker Client (`androgrid-android`)
-- **Primary Repository:** [github.com/MrQuality/androgrid-android](https://github.com/MrQuality/androgrid-android)
+- **Primary Repository:** [github.com/ligature-platform/androgrid-android](https://github.com/ligature-platform/androgrid-android)
 - **Role:** Native Android worker service executing sandboxed WebAssembly compute payloads across Wi-Fi and Cellular WAN.
 - **Technology Stack:** Kotlin 1.9+, Android SDK (API 28 to 34), Jetpack WorkManager, Typed Foreground Services (`dataSync`), Chicory zero-dependency WASM interpreter, and OkHttp / gRPC-Kotlin.
 - **Key Subsystems:**
@@ -82,7 +82,7 @@ flowchart TD
   - `com.androgrid.worker.telemetry`: ThermalSafetyGuard enforcing 38 C cutoff and 35 C resume hysteresis.
   - `com.androgrid.worker.network`: Zero-keepalive cellular socket lifecycle with 200 ms radio teardown (`[NFR-POW-001]`).
   - `com.androgrid.worker.ui`: Jetpack Compose real-time worker dashboard and QR scanner.
-- **Interactive Dokka API Portal:** [mrquality.github.io/androgrid-android/dokka](https://mrquality.github.io/androgrid-android/dokka/index.html)
+- **Interactive Dokka API Portal:** [ligature-platform.github.io/androgrid-android/dokka](https://ligature-platform.github.io/androgrid-android/dokka/index.html)
 - **Documentation:** [Android Worker Onboarding Guide](../android/worker_guide.md) and [Android Client Architecture](../android/architecture.md).
 
 ### Pillar 3: System Architecture Specification & Invariants (`AG-SPEC-2026-V2`)
@@ -103,10 +103,10 @@ flowchart TD
 
 | Resource | Purpose | Target URL |
 | :--- | :--- | :--- |
-| **Backend Source Code** | Control Plane, Orchestrator, CLI | [github.com/MrQuality/androgrid-backend](https://github.com/MrQuality/androgrid-backend) |
-| **Android Worker Client** | Native Android application | [github.com/MrQuality/androgrid-android](https://github.com/MrQuality/androgrid-android) |
-| **Interactive Kotlin Dokka** | Android Client API reference | [mrquality.github.io/androgrid-android/dokka/index.html](https://mrquality.github.io/androgrid-android/dokka/index.html) |
+| **Backend Source Code** | Control Plane, Orchestrator, CLI | [github.com/ligature-platform/androgrid-backend](https://github.com/ligature-platform/androgrid-backend) |
+| **Android Worker Client** | Native Android application | [github.com/ligature-platform/androgrid-android](https://github.com/ligature-platform/androgrid-android) |
+| **Interactive Kotlin Dokka** | Android Client API reference | [ligature-platform.github.io/androgrid-android/dokka/index.html](https://ligature-platform.github.io/androgrid-android/dokka/index.html) |
 | **Protobuf API Reference** | Canonical gRPC service schema | [Protobuf API Reference](../api/protobuf.md) |
-| **Container Images** | Pre-built rootless OCI container | `ghcr.io/mrquality/androgrid-orchestrator:latest` |
-| **Starter Workload** | Rust wasm32-wasip1 starter project | [workloads/wasi-starter/README.md](https://github.com/MrQuality/androgrid-backend/tree/main/workloads/wasi-starter) |
+| **Container Images** | Pre-built rootless OCI container | `ghcr.io/ligature-platform/androgrid-orchestrator:latest` |
+| **Starter Workload** | Rust wasm32-wasip1 starter project | [workloads/wasi-starter/README.md](https://github.com/ligature-platform/androgrid-backend/tree/main/workloads/wasi-starter) |
 | **Hardware Feasibility FAQ** | Battery longevity and thermal metrics | [Mobile Economics & Battery FAQ](economics_faq.md) |

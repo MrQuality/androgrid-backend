@@ -5,7 +5,7 @@ This document details the internal architecture, lifecycle state machines, compu
 Traceability: `[REQ-OP-001]`, `[REQ-OP-002]`, `[REQ-OP-003]`, `[REQ-VER-001]`, `[REQ-VER-002]`, `[INV-001]`, `[INV-002]`, `[INV-003]`, `[NFR-POW-001]`.
 
 <div class="callout callout-info">
-  <strong>Interactive Kotlin API Reference:</strong> For code symbols, classes, and KDoc method signatures, visit the dedicated <a href="https://mrquality.github.io/androgrid-android/dokka/index.html" target="_blank">Android Dokka API Documentation &nearr;</a>.
+  <strong>Interactive Kotlin API Reference:</strong> For code symbols, classes, and KDoc method signatures, visit the dedicated <a href="https://ligature-platform.github.io/androgrid-android/dokka/index.html" target="_blank">Android Dokka API Documentation &nearr;</a>.
 </div>
 
 ---

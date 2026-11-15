@@ -21,19 +21,19 @@ As an alpha tester, **you do not need to clone repositories, compile code, or op
 
 All immutable binary packages, mobile application bundles, and pre-compiled WASM workloads are hosted directly as release assets on GitHub:
 
-* **GitHub Release Page:** [AndroGrid v0.0.1-alpha.4 Release Assets](https://github.com/MrQuality/androgrid-backend/releases/tag/v0.0.1-alpha.4)
+* **GitHub Release Page:** [AndroGrid v0.0.1-alpha.4 Release Assets](https://github.com/ligature-platform/androgrid-backend/releases/tag/v0.0.1-alpha.4)
 
 ### Asset Download Directory
 
 | Component | Target Platform | Release Asset Link |
 | :--- | :--- | :--- |
-| **Android Worker APK** | Android 9+ (API 28 to 37) | [`androgrid-worker-v0.0.1-alpha.4.apk`](https://github.com/MrQuality/androgrid-android/releases/download/v0.0.1-alpha.4/androgrid-worker-v0.0.1-alpha.4.apk) |
-| **CLI & Orchestrator** | Linux (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz) |
-| **CLI & Orchestrator** | Linux (ARM64 / aarch64) | [`androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz) |
-| **CLI & Orchestrator** | Windows (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip) |
-| **CLI & Orchestrator** | macOS (Apple Silicon / ARM64) | [`androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz) |
-| **Sample WASI Workload** | Universal WASM (`wasm32-wasip1`) | [`image-processor.wasm`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/image-processor.wasm) |
-| **Verification Ledger** | SHA-256 Checksums | [`SHA256SUMS.txt`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/SHA256SUMS.txt) |
+| **Android Worker APK** | Android 9+ (API 28 to 37) | [`androgrid-worker-v0.0.1-alpha.4.apk`](https://github.com/ligature-platform/androgrid-android/releases/download/v0.0.1-alpha.4/androgrid-worker-v0.0.1-alpha.4.apk) |
+| **CLI & Orchestrator** | Linux (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz) |
+| **CLI & Orchestrator** | Linux (ARM64 / aarch64) | [`androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz) |
+| **CLI & Orchestrator** | Windows (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip) |
+| **CLI & Orchestrator** | macOS (Apple Silicon / ARM64) | [`androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz) |
+| **Sample WASI Workload** | Universal WASM (`wasm32-wasip1`) | [`image-processor.wasm`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/image-processor.wasm) |
+| **Verification Ledger** | SHA-256 Checksums | [`SHA256SUMS.txt`](https://github.com/ligature-platform/androgrid-backend/releases/download/v0.0.1-alpha.4/SHA256SUMS.txt) |
 
 ### Integrity Verification
 
@@ -183,10 +183,10 @@ Alpha test feedback directly drives stability fixes for upcoming milestone relea
 ### Where to File
 
 * **Android Mobile Worker Issues:**
-  File at [**androgrid-android/issues/new**](https://github.com/MrQuality/androgrid-android/issues/new)
+  File at [**androgrid-android/issues/new**](https://github.com/ligature-platform/androgrid-android/issues/new)
   * Target topics: APK install errors, camera scanner glitches, crash logs, WorkManager background task killing, thermal throttling false-positives, or UI layout defects.
 * **Control Plane, Orchestrator, & CLI Issues:**
-  File at [**androgrid-backend/issues/new**](https://github.com/MrQuality/androgrid-backend/issues/new)
+  File at [**androgrid-backend/issues/new**](https://github.com/ligature-platform/androgrid-backend/issues/new)
   * Target topics: CLI pairing crashes, gRPC mTLS connection timeouts, orchestrator scheduling panics, or corrupted WASM result validation.
 
 ---

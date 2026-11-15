@@ -1,8 +1,8 @@
 # Multi-stage production container for AndroGrid Control Plane Orchestrator
 # Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001], [NFR-PERF-001]
 
-# Stage 1: Build binary using official Rust 1.82 toolchain
-FROM rust:1.82-bookworm AS builder
+# Stage 1: Build binary using official Rust stable toolchain (supports edition2024 deps)
+FROM rust:1-bookworm AS builder
 
 WORKDIR /usr/src/androgrid-backend
 

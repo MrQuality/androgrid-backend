@@ -82,6 +82,7 @@ The following table defines standard error mappings across all RPC interactions:
 | `ClaimCellularTask` | `9 FAILED_PRECONDITION` | `UNMETERED_REQUIRED` | All queued tasks require unmetered Wi-Fi. | Backoff for 5 minutes or sleep until Wi-Fi association. |
 | `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `TASK_ATTEMPT_STALE` | Task was committed by another worker or lease expired. | Discard local task output; return worker to idle state. |
 | `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `GROUP_SUPERSEDED` | Task belongs to a cancelled or superseded `TaskGroup` epoch (`ADR-006`). | Discard local task output; return worker to idle state. |
+| `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `TASK_CANCELLED` | Task was cancelled via `CancelTaskGroup` on the active epoch. | Discard local task output; return worker to idle state. |
 | `SubmitCellularResult` | `3 INVALID_ARGUMENT` | `PAYLOAD_CORRUPT` | Bytecode SHA-256 or stdout exceeds boundaries. | Log error diagnostic; do not retry. |
 
 ---

@@ -36,8 +36,8 @@ We introduce a synchronous `TaskGroup` Epoch & Manifest Coordinator directly ins
 
 4. **Deterministic Partition IDs and `TaskState::Cancelled`:**
    - Task IDs are formatted deterministically as `{group_id}:e{epoch}:p{index}` (`0..N-1`), validated with `group_id` matching `^[a-zA-Z0-9_-]{1,64}$` and `1 <= partitions.len() <= 1000`.
-   - `TaskState` adds `TASK_STATE_CANCELLED = 8` (distinct from `PREEMPTED` used by `[INV-005]`). Standalone `SubmitTask` rejects caller-supplied `group_id` or `group_epoch` to prevent group injection.
-   - `ReplaceTaskGroupRequest` uses `optional uint64 expected_epoch` (`None` = unconditional, `Some(v)` = strict CAS check returning `ABORTED` on mismatch) and requires explicit `partitions` (no implicit empty-partition reuse).
+   - `TaskState` adds `TASK_STATE_CANCELLED = 8` (distinct from `PREEMPTED` used by `[INV-005]`). Standalone `SubmitTask` rejects caller-supplied `group_id`, `group_epoch`, or reserved `<group>:e<epoch>:p<index>` task IDs to prevent group injection and ID collisions.
+   - `ReplaceTaskGroupRequest` uses `optional uint64 expected_epoch` (`None` = unconditional, `Some(v)` = strict CAS check returning `ABORTED` on mismatch) and requires explicit `partitions` (no implicit empty-partition reuse). Both `ReplaceTaskGroup` and `CancelTaskGroup` reject terminal groups (`Completed`, `Failed`, `Cancelled`) with `GROUP_TERMINAL`, and standalone `CancelTask` rejects group-owned partitions so group atomicity is preserved.
 
 5. **Rollout Strategies:**
    - `REPLACE_STRATEGY_IMMEDIATE` (default): Cancels all non-terminal tasks in the prior epoch (`TASK_STATE_CANCELLED`), queues Wi-Fi `cancel_task_ids` (cleared once delivered in `SyncNodeStateResponse`), and enqueues new epoch tasks as `PENDING`.

@@ -55,6 +55,26 @@ service AdminService {
   // List all known compute tasks and their lifecycle execution states.
   // Traces to: [REQ-OP-004], [INV-004], [INV-005]
   rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
+
+  // Submit a partitioned TaskGroup workload using a shared content-addressed template.
+  // Traces to: [REQ-OP-004], [INV-004], [INV-006], [NFR-PERF-001]
+  rpc SubmitTaskGroup(SubmitTaskGroupRequest) returns (SubmitTaskGroupResponse);
+
+  // Atomically replace a TaskGroup workload with a new epoch and rollout strategy.
+  // Traces to: [INV-004], [NFR-REL-001], [NFR-PERF-001]
+  rpc ReplaceTaskGroup(ReplaceTaskGroupRequest) returns (ReplaceTaskGroupResponse);
+
+  // Cancel a TaskGroup and all of its non-terminal tasks.
+  // Traces to: [REQ-OP-004], [INV-004]
+  rpc CancelTaskGroup(CancelTaskGroupRequest) returns (CancelTaskGroupResponse);
+
+  // Retrieve aggregate status and optional per-partition details for a TaskGroup.
+  // Traces to: [REQ-OP-004], [NFR-PERF-001]
+  rpc GetTaskGroupStatus(GetTaskGroupStatusRequest) returns (GetTaskGroupStatusResponse);
+
+  // List all registered TaskGroups and their current epoch summaries.
+  // Traces to: [REQ-OP-004]
+  rpc ListTaskGroups(ListTaskGroupsRequest) returns (ListTaskGroupsResponse);
 }
 
 // EnrollmentService provides bootstrap enrollment for unprovisioned worker nodes.
@@ -91,6 +111,26 @@ enum TaskState {
   TASK_STATE_FAILED = 5;
   TASK_STATE_PREEMPTED = 6;
   TASK_STATE_TIMED_OUT = 7;
+  TASK_STATE_CANCELLED = 8;
+}
+
+// Lifecycle states for a coordinated TaskGroup workload.
+// Traces to: [REQ-OP-004], [INV-004], [NFR-REL-001]
+enum TaskGroupState {
+  TASK_GROUP_STATE_UNSPECIFIED = 0;
+  TASK_GROUP_STATE_ACTIVE = 1;
+  TASK_GROUP_STATE_DRAINING = 2;
+  TASK_GROUP_STATE_COMPLETED = 3;
+  TASK_GROUP_STATE_FAILED = 4;
+  TASK_GROUP_STATE_CANCELLED = 5;
+}
+
+// Rollout strategy when atomically replacing a TaskGroup epoch.
+// Traces to: [INV-004], [NFR-REL-001]
+enum ReplaceStrategy {
+  REPLACE_STRATEGY_UNSPECIFIED = 0;
+  REPLACE_STRATEGY_IMMEDIATE = 1;
+  REPLACE_STRATEGY_DRAIN = 2;
 }
 
 // Hardware and platform capabilities reported by worker node.
@@ -124,6 +164,8 @@ message TaskSpec {
   bool requires_unmetered = 10;
   // Deprecated: workers resolve content-addressed artifacts via FetchArtifact over mTLS 50051.
   string artifact_url = 11 [deprecated = true];
+  string group_id = 12;
+  uint64 group_epoch = 13;
 }
 
 // Unary request to claim a spot task over cellular WAN.
@@ -359,6 +401,129 @@ message FetchArtifactRequest {
 message FetchArtifactResponse {
   bytes wasm_bytecode = 1;
   string artifact_sha256 = 2;
+}
+
+// Shared workload template for all partitions in a TaskGroup.
+// Inline wasm_bytecode is forbidden; WASM workloads must reference a pre-uploaded artifact_sha256.
+// Traces to: [NFR-PERF-001], [INV-006], [ANTI-003]
+message TaskTemplate {
+  ExecutionEngine engine = 1;
+  uint32 timeout_seconds = 2;
+  string entrypoint = 3;
+  map<string, string> env_vars = 4;
+  string artifact_sha256 = 5;
+  string shell_command = 6;
+  bool requires_unmetered = 7;
+}
+
+// Per-partition environment overrides within a TaskGroup.
+message TaskPartitionSpec {
+  map<string, string> env_overrides = 1;
+}
+
+// Specification for creating a new TaskGroup.
+// Traces to: [REQ-OP-004], [INV-004], [NFR-PERF-001]
+message TaskGroupSpec {
+  string group_id = 1;
+  TaskTemplate template = 2;
+  repeated TaskPartitionSpec partitions = 3;
+}
+
+// Request to submit a new TaskGroup.
+message SubmitTaskGroupRequest {
+  TaskGroupSpec group = 1;
+}
+
+// Response acknowledging TaskGroup admission.
+message SubmitTaskGroupResponse {
+  bool accepted = 1;
+  string group_id = 2;
+  uint64 group_epoch = 3;
+  uint32 total_tasks = 4;
+  string message = 5;
+}
+
+// Request to atomically replace a TaskGroup workload with a new epoch.
+// Traces to: [INV-004], [NFR-REL-001]
+message ReplaceTaskGroupRequest {
+  string group_id = 1;
+  optional uint64 expected_epoch = 2;
+  TaskTemplate template = 3;
+  repeated TaskPartitionSpec partitions = 4;
+  ReplaceStrategy strategy = 5;
+}
+
+// Response acknowledging atomic TaskGroup replacement.
+message ReplaceTaskGroupResponse {
+  bool accepted = 1;
+  string group_id = 2;
+  uint64 new_epoch = 3;
+  TaskGroupState state = 4;
+  uint32 cancelled_tasks = 5;
+  uint32 draining_tasks = 6;
+  uint32 created_tasks = 7;
+  string message = 8;
+}
+
+// Request to cancel an active or draining TaskGroup.
+message CancelTaskGroupRequest {
+  string group_id = 1;
+  optional uint64 expected_epoch = 2;
+}
+
+// Response acknowledging TaskGroup cancellation.
+message CancelTaskGroupResponse {
+  bool cancelled = 1;
+  string group_id = 2;
+  uint64 epoch = 3;
+  uint32 cancelled_tasks = 4;
+  string message = 5;
+}
+
+// Request for aggregate status of a TaskGroup.
+message GetTaskGroupStatusRequest {
+  string group_id = 1;
+  bool include_tasks = 2;
+}
+
+// Aggregate status and partition counters for a TaskGroup.
+// Traces to: [REQ-OP-004], [NFR-PERF-001]
+message GetTaskGroupStatusResponse {
+  string group_id = 1;
+  uint64 current_epoch = 2;
+  TaskGroupState state = 3;
+  uint32 total_tasks = 4;
+  uint32 pending_tasks = 5;
+  uint32 leased_tasks = 6;
+  uint32 running_tasks = 7;
+  uint32 completed_tasks = 8;
+  uint32 failed_tasks = 9;
+  uint32 timed_out_tasks = 10;
+  uint32 cancelled_tasks = 11;
+  uint32 preempted_tasks = 12;
+  uint32 previous_epoch_draining_tasks = 13;
+  repeated TaskInfo tasks = 14;
+}
+
+// Summary snapshot for a registered TaskGroup.
+message TaskGroupSummary {
+  string group_id = 1;
+  uint64 current_epoch = 2;
+  TaskGroupState state = 3;
+  uint32 total_tasks = 4;
+  uint32 completed_tasks = 5;
+  uint32 failed_tasks = 6;
+  uint32 cancelled_tasks = 7;
+}
+
+// Request to list registered TaskGroups.
+message ListTaskGroupsRequest {
+  TaskGroupState state_filter = 1;
+}
+
+// Response containing TaskGroup summaries.
+message ListTaskGroupsResponse {
+  repeated TaskGroupSummary groups = 1;
 }
 
 

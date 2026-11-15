@@ -216,6 +216,8 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
         artifact_sha256: "sha256-test".to_string(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
     scheduler.submit_task(task_spec).unwrap();
 

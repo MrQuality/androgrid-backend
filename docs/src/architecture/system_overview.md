@@ -97,3 +97,38 @@ To ensure safe computation across unrooted consumer devices:
 - **Sandbox Isolation Boundary (`[INV-006]`):** Unrooted devices are strictly restricted to WebAssembly execution (`EXECUTION_ENGINE_WASM_WASI`). Shell execution (`EXECUTION_ENGINE_ROOT_SHELL`) is never assigned to unrooted workers.
 - **In-Memory Pure-JVM Execution (`[REQ-VER-003]`):** Android 10+ devices enforce W^X (Write XOR Execute) memory policies on application directories. The Android worker embeds the Chicory pure-JVM WebAssembly and WASI Preview 1 interpreter, executing bytecode entirely in-memory without compiling or emitting native `.so` binaries on writable app storage.
 - **Decoupled Artifact Distribution:** WebAssembly bytecode is distributed via content-addressed SHA-256 URLs, reducing unary gRPC metadata to under 4 KB and preserving cellular radio sleep deadlines (`[NFR-POW-001]`).
+
+---
+
+## TaskGroup Workload Abstraction and Atomic Epoch Replacement
+
+For multi-partition workloads (such as tiled image processing or distributed map-reduce jobs), managing dozens or hundreds of independent `TaskSpec` records manually makes upgrades error-prone and leaves stale workers draining battery on superseded bytecode. **TaskGroup** (`ADR-006`) introduces a first-class batch workload entity inside `SchedulerInner`:
+
+- **Shared Content-Addressed Template (`[NFR-PERF-001]`):** Every `TaskGroupSpec` binds up to 1,000 partitions to a single `TaskTemplate` referencing a pre-uploaded `artifact_sha256` in `ArtifactStore` (inline `wasm_bytecode` is forbidden). Partition IDs are generated deterministically as `{group_id}:e{epoch}:p{index}`.
+- **Two-Level Monotonic Fencing (`[INV-004]`, `[NFR-REL-001]`):**
+  - `group_epoch` (`u64`, starting at `1`) fences workload-level upgrades across the entire group (`GROUP_SUPERSEDED`).
+  - `run_attempt` (`u32`) continues to fence per-task retries and Wi-Fi speculative preemptions (`TASK_ATTEMPT_STALE`).
+- **Atomic Epoch Replacement (`ReplaceTaskGroup`):**
+  - Optimistic CAS via `optional uint64 expected_epoch` (`ABORTED` on mismatch) prevents concurrent operator races.
+  - **`REPLACE_STRATEGY_IMMEDIATE` (Default):** Cancels all non-terminal tasks in the prior epoch (`TASK_STATE_CANCELLED`), queues `cancel_task_ids` for Wi-Fi workers, and enqueues the new epoch immediately.
+  - **`REPLACE_STRATEGY_DRAIN`:** Cancels `PENDING` tasks from the prior epoch, enters `TASK_GROUP_STATE_DRAINING` so in-flight `LEASED`/`RUNNING` tasks can finish within their existing lease deadlines, and enqueues the new epoch concurrently.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Op as Operator (androgrid-cli group)
+    participant Orch as Control Plane (SchedulerInner CAS)
+    participant Worker as Worker Node (Epoch 1)
+
+    Op->>Orch: SubmitTaskGroup (group="img-batch", partitions=4, sha256=v1)
+    Orch-->>Op: Accepted (group_epoch=1, tasks=img-batch:e1:p0..p3)
+    Worker->>Orch: ClaimCellularTask / SyncNodeState
+    Orch-->>Worker: Assigned img-batch:e1:p0 (group_epoch=1)
+
+    Op->>Orch: ReplaceTaskGroup (group="img-batch", expected_epoch=1, sha256=v2, strategy=IMMEDIATE)
+    Orch->>Orch: Single-lock CAS: bump group_epoch 1 -> 2, mark e1 tasks CANCELLED
+    Orch-->>Op: Accepted (new_epoch=2, cancelled_tasks=4, created_tasks=4)
+
+    Worker->>Orch: SubmitCellularResult (img-batch:e1:p0)
+    Orch-->>Worker: FAILED_PRECONDITION (GROUP_SUPERSEDED)
+```

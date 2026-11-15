@@ -2,7 +2,7 @@
 //!
 //! Traces to: AG-SPEC-2026-V2 Section 4.1, Section 6.1, Section 6.2, [INV-004], [INV-005], [INV-006]
 
-use crate::{ExecutionEngine, NodeCapabilities, TaskSpec, TaskState};
+use crate::{ExecutionEngine, NodeCapabilities, TaskGroupState, TaskSpec, TaskState, TaskTemplate};
 
 /// Execution artifacts committed by a winning worker node.
 ///
@@ -31,12 +31,24 @@ pub struct TaskRecord {
     pub speculative_node_id: Option<String>,
     pub lease_deadline_epoch_s: u64,
     pub result: Option<TaskExecutionResult>,
+    pub group_id: Option<String>,
+    pub group_epoch: Option<u64>,
 }
 
 impl TaskRecord {
     /// Constructs a new task record in the PENDING state.
     pub fn new(mut spec: TaskSpec) -> Self {
         spec.run_attempt = 0;
+        let group_id = if spec.group_id.is_empty() {
+            None
+        } else {
+            Some(spec.group_id.clone())
+        };
+        let group_epoch = if spec.group_epoch == 0 {
+            None
+        } else {
+            Some(spec.group_epoch)
+        };
         Self {
             spec,
             state: TaskState::Pending,
@@ -45,6 +57,8 @@ impl TaskRecord {
             speculative_node_id: None,
             lease_deadline_epoch_s: 0,
             result: None,
+            group_id,
+            group_epoch,
         }
     }
 
@@ -87,4 +101,19 @@ impl WorkerRecord {
     pub fn allows_root_execution(&self) -> bool {
         self.capabilities.is_rooted
     }
+}
+
+/// In-memory coordination record for a partitioned TaskGroup and its monotonic epoch.
+///
+/// Traces to: [REQ-OP-004], [INV-004], [NFR-REL-001]
+#[derive(Debug, Clone)]
+pub struct TaskGroupRecord {
+    pub group_id: String,
+    pub group_epoch: u64,
+    pub state: TaskGroupState,
+    pub template: TaskTemplate,
+    pub current_task_ids: Vec<String>,
+    pub draining_task_ids: Vec<String>,
+    pub created_at_epoch_ms: u64,
+    pub updated_at_epoch_ms: u64,
 }

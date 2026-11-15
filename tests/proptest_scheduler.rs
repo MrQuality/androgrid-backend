@@ -32,6 +32,8 @@ prop_compose! {
             artifact_sha256: "sha256-prop".to_string(),
             requires_unmetered,
             artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
         }
     }
 }
@@ -72,6 +74,8 @@ proptest! {
             artifact_sha256: "sha256-prop".to_string(),
             requires_unmetered: false,
             artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
         };
 
         scheduler.submit_task(spec).unwrap();
@@ -155,5 +159,113 @@ proptest! {
         let caps = scheduler.get_worker_capabilities("node-unrooted-prop").unwrap();
         prop_assert!(!caps.is_rooted);
         prop_assert!(!caps.supported_engines.contains(&(ExecutionEngine::RootShell as i32)));
+    }
+
+    /// Invariant [INV-004], [NFR-REL-001]: TaskGroup partition conservation holds across
+    /// arbitrary partition counts and Immediate/Drain replacements.
+    #[test]
+    fn prop_task_group_conservation_and_epoch_fencing(
+        p1 in 1usize..16usize,
+        p2 in 1usize..16usize,
+        use_drain in any::<bool>(),
+    ) {
+        use androgrid_backend::{
+            ReplaceStrategy, ReplaceTaskGroupRequest, SubmitCellularResultRequest, TaskGroupSpec,
+            TaskPartitionSpec, TaskTemplate,
+        };
+        use std::collections::HashMap;
+
+        let scheduler = ClusterScheduler::new();
+        let template = TaskTemplate {
+            engine: ExecutionEngine::WasmWasi as i32,
+            timeout_seconds: 120,
+            entrypoint: "_start".to_string(),
+            env_vars: HashMap::new(),
+            artifact_sha256: "a".repeat(64),
+            shell_command: String::new(),
+            requires_unmetered: false,
+        };
+
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "prop-grp".to_string(),
+                    template: Some(template.clone()),
+                    partitions: vec![TaskPartitionSpec::default(); p1],
+                },
+                1000,
+            )
+            .unwrap();
+
+        let cell_caps = NodeCapabilities {
+            is_rooted: false,
+            supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+            cpu_cores: 4,
+            total_ram_bytes: 4 * 1024 * 1024 * 1024,
+            os_version: "14".to_string(),
+            abi: "arm64-v8a".to_string(),
+            is_metered: true,
+            current_transport: NetworkTransportType::NetworkTransportCellularWan as i32,
+            max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
+        };
+        scheduler
+            .register_node("prop-cell".to_string(), cell_caps, "1.0.0".to_string(), 1000)
+            .unwrap();
+        let claimed = scheduler
+            .claim_cellular_task_nominal("prop-cell", 90, false, 10)
+            .unwrap()
+            .task
+            .unwrap();
+
+        let strategy = if use_drain {
+            ReplaceStrategy::Drain as i32
+        } else {
+            ReplaceStrategy::Immediate as i32
+        };
+        scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "prop-grp".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(template),
+                    partitions: vec![TaskPartitionSpec::default(); p2],
+                    strategy,
+                },
+                2000,
+            )
+            .unwrap();
+
+        let st = scheduler.get_task_group_status("prop-grp", false).unwrap();
+        let sum = st.pending_tasks
+            + st.leased_tasks
+            + st.running_tasks
+            + st.completed_tasks
+            + st.failed_tasks
+            + st.timed_out_tasks
+            + st.cancelled_tasks
+            + st.preempted_tasks;
+        prop_assert_eq!(sum, st.total_tasks);
+        prop_assert_eq!(st.total_tasks, p2 as u32);
+        prop_assert_eq!(st.current_epoch, 2);
+
+        let res = scheduler.submit_cellular_result(&SubmitCellularResultRequest {
+            node_id: "prop-cell".to_string(),
+            task_id: claimed.task_id,
+            run_attempt: claimed.run_attempt,
+            exit_code: 0,
+            stdout_bytes: Vec::new(),
+            stderr_bytes: Vec::new(),
+            error_code: String::new(),
+            error_message: String::new(),
+            execution_duration_ms: 10,
+        });
+        if use_drain {
+            prop_assert!(res.is_ok());
+        } else {
+            let is_superseded = matches!(res, Err(SchedulingError::GroupSuperseded { .. }));
+            prop_assert!(is_superseded);
+        }
     }
 }

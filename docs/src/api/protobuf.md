@@ -50,6 +50,11 @@ Atomically submits task execution results (exit code, stdout, stderr, execution 
 | `UploadArtifact` | `UploadArtifactRequest` | `UploadArtifactResponse` | Upload WASM bytecode to content-addressed storage |
 | `GeneratePairingToken` | `GeneratePairingTokenRequest` | `GeneratePairingTokenResponse` | Generate an ephemeral device pairing token and QR payload |
 | `ListTasks` | `ListTasksRequest` | `ListTasksResponse` | List all known compute tasks and their lifecycle execution states |
+| `SubmitTaskGroup` | `SubmitTaskGroupRequest` | `SubmitTaskGroupResponse` | Submit a partitioned TaskGroup backed by a shared content-addressed template |
+| `ReplaceTaskGroup` | `ReplaceTaskGroupRequest` | `ReplaceTaskGroupResponse` | Atomically replace a TaskGroup with a new epoch and rollout strategy |
+| `CancelTaskGroup` | `CancelTaskGroupRequest` | `CancelTaskGroupResponse` | Cancel an active or draining TaskGroup and its non-terminal tasks |
+| `GetTaskGroupStatus` | `GetTaskGroupStatusRequest` | `GetTaskGroupStatusResponse` | Retrieve aggregate TaskGroup state, epoch, and partition counters |
+| `ListTaskGroups` | `ListTaskGroupsRequest` | `ListTaskGroupsResponse` | List registered TaskGroups and their current epoch summaries |
 
 ---
 
@@ -76,6 +81,8 @@ The following table defines standard error mappings across all RPC interactions:
 | `ClaimCellularTask` | `16 UNAUTHENTICATED` | `CERTIFICATE_INVALID` | Client certificate expired, revoked, or untrusted. | Terminate session immediately; surface notification to user. |
 | `ClaimCellularTask` | `9 FAILED_PRECONDITION` | `UNMETERED_REQUIRED` | All queued tasks require unmetered Wi-Fi. | Backoff for 5 minutes or sleep until Wi-Fi association. |
 | `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `TASK_ATTEMPT_STALE` | Task was committed by another worker or lease expired. | Discard local task output; return worker to idle state. |
+| `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `GROUP_SUPERSEDED` | Task belongs to a cancelled or superseded `TaskGroup` epoch (`ADR-006`). | Discard local task output; return worker to idle state. |
+| `SubmitCellularResult` | `9 FAILED_PRECONDITION` | `TASK_CANCELLED` | Task was cancelled via `CancelTaskGroup` on the active epoch. | Discard local task output; return worker to idle state. |
 | `SubmitCellularResult` | `3 INVALID_ARGUMENT` | `PAYLOAD_CORRUPT` | Bytecode SHA-256 or stdout exceeds boundaries. | Log error diagnostic; do not retry. |
 
 ---
@@ -102,6 +109,20 @@ The following table defines standard error mappings across all RPC interactions:
 - `TASK_STATE_FAILED = 5`: Task failed during execution.
 - `TASK_STATE_PREEMPTED = 6`: Task preempted by a higher-priority worker.
 - `TASK_STATE_TIMED_OUT = 7`: Execution exceeded deadline.
+- `TASK_STATE_CANCELLED = 8`: Task cancelled explicitly or superseded by `ReplaceTaskGroup` / `CancelTaskGroup`.
+
+### `TaskGroupState`
+- `TASK_GROUP_STATE_UNSPECIFIED = 0`: Unknown group state.
+- `TASK_GROUP_STATE_ACTIVE = 1`: Group is active on its current epoch.
+- `TASK_GROUP_STATE_DRAINING = 2`: Group replaced via `REPLACE_STRATEGY_DRAIN`; prior epoch in-flight tasks are draining while new epoch tasks run.
+- `TASK_GROUP_STATE_COMPLETED = 3`: All partitions in the current epoch completed.
+- `TASK_GROUP_STATE_FAILED = 4`: One or more partitions failed or timed out.
+- `TASK_GROUP_STATE_CANCELLED = 5`: Group cancelled via `CancelTaskGroup`.
+
+### `ReplaceStrategy`
+- `REPLACE_STRATEGY_UNSPECIFIED = 0`: Defaults to `REPLACE_STRATEGY_IMMEDIATE`.
+- `REPLACE_STRATEGY_IMMEDIATE = 1`: Cancels all non-terminal prior epoch tasks immediately and queues `cancel_task_ids`.
+- `REPLACE_STRATEGY_DRAIN = 2`: Cancels prior `PENDING` tasks, allows `LEASED`/`RUNNING` tasks to finish within existing lease deadlines, and enqueues the new epoch immediately.
 
 ---
 
@@ -174,5 +195,36 @@ message SubmitCellularResultRequest {
   string error_code = 7;
   string error_message = 8;
   uint64 execution_duration_ms = 9;
+}
+```
+
+### `TaskGroupSpec` & `ReplaceTaskGroupRequest`
+```protobuf
+message TaskTemplate {
+  ExecutionEngine engine = 1;
+  uint32 timeout_seconds = 2;
+  string entrypoint = 3;
+  map<string, string> env_vars = 4;
+  string artifact_sha256 = 5;
+  string shell_command = 6;
+  bool requires_unmetered = 7;
+}
+
+message TaskPartitionSpec {
+  map<string, string> env_overrides = 1;
+}
+
+message TaskGroupSpec {
+  string group_id = 1;
+  TaskTemplate template = 2;
+  repeated TaskPartitionSpec partitions = 3;
+}
+
+message ReplaceTaskGroupRequest {
+  string group_id = 1;
+  optional uint64 expected_epoch = 2;
+  TaskTemplate template = 3;
+  repeated TaskPartitionSpec partitions = 4;
+  ReplaceStrategy strategy = 5;
 }
 ```

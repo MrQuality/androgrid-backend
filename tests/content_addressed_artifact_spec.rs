@@ -337,6 +337,8 @@ async fn test_admin_service_upload_and_decoupled_task_dispatch_under_4kb() {
         artifact_sha256: upload_res.artifact_sha256.clone(),
         requires_unmetered: false,
         artifact_url: upload_res.artifact_url.clone(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
 
     let submit_req = SubmitTaskRequest {
@@ -430,6 +432,8 @@ async fn test_admin_service_upload_and_decoupled_task_dispatch_under_4kb() {
         artifact_sha256: String::new(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
     let mut inband_buf = Vec::new();
     ClaimCellularTaskResponse {

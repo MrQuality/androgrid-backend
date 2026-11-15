@@ -314,6 +314,8 @@ impl BenchmarkDispatcher {
                 artifact_sha256: compute_sha256_hex(&tile.payload_bytes),
                 requires_unmetered: self.config.requires_unmetered,
                 artifact_url: artifact_url.clone(),
+                group_id: String::new(),
+                group_epoch: 0,
             };
 
             total_transferred += tile.payload_bytes.len();
@@ -356,6 +358,7 @@ impl BenchmarkDispatcher {
                     break;
                 } else if status_res.state == TaskState::Failed as i32
                     || status_res.state == TaskState::TimedOut as i32
+                    || status_res.state == TaskState::Cancelled as i32
                 {
                     return Err(BenchmarkError::TaskExecutionFailed {
                         tile_index: tile.tile_index,

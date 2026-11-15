@@ -64,4 +64,47 @@ pub enum SchedulingError {
     /// Traces to: [INV-006]
     #[error("Execution of root shell tasks is disabled on this cluster without --allow-insecure-root-tasks")]
     RootShellExecutionDisabled,
+
+    #[error("TaskGroup '{0}' not found")]
+    GroupNotFound(String),
+
+    #[error("TaskGroup '{0}' already exists")]
+    GroupAlreadyExists(String),
+
+    #[error("TaskGroup '{0}' is already in a terminal state")]
+    GroupTerminal(String),
+
+    /// Traces to: [INV-004], [NFR-REL-001]
+    #[error("TaskGroup '{group_id}' epoch conflict: expected {expected}, actual {actual}")]
+    GroupEpochConflict {
+        group_id: String,
+        expected: u64,
+        actual: u64,
+    },
+
+    /// Traces to: [INV-004], [NFR-REL-001]
+    #[error("Task '{task_id}' belongs to superseded TaskGroup '{group_id}' epoch {task_epoch} (active epoch: {active_epoch})")]
+    GroupSuperseded {
+        task_id: String,
+        group_id: String,
+        task_epoch: u64,
+        active_epoch: u64,
+    },
+
+    #[error("Invalid TaskGroup ID '{0}': must match ^[a-zA-Z0-9_-]{{1,64}}$")]
+    InvalidGroupId(String),
+
+    #[error("Invalid TaskGroup partitions: {0}")]
+    InvalidGroupPartitions(String),
+
+    /// Traces to: [REQ-OP-004], [INV-004]
+    #[error("Task '{0}' was cancelled")]
+    TaskCancelled(String),
+
+    /// Traces to: [INV-006], [REQ-OP-004]
+    #[error("Invalid TaskTemplate: {0}")]
+    InvalidTaskTemplate(String),
+
+    #[error("Task ID collision: {0}")]
+    TaskIdCollision(String),
 }

@@ -16,11 +16,13 @@ use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
     build_client_mtls_config, cert_init, cert_issue_admin, cert_issue_csr, cert_issue_server,
     export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig, BenchmarkDispatcher,
-    BenchmarkFilter, CaSource, CancelTaskRequest, ExecutionEngine, GeneratePairingTokenRequest,
-    GetTaskStatusRequest, ListTasksRequest, ListWorkerNodesRequest, PkiInitConfig,
+    BenchmarkFilter, CaSource, CancelTaskGroupRequest, CancelTaskRequest, ExecutionEngine,
+    GeneratePairingTokenRequest, GetTaskGroupStatusRequest, GetTaskStatusRequest,
+    ListTaskGroupsRequest, ListTasksRequest, ListWorkerNodesRequest, PkiInitConfig,
     PkiIssueAdminConfig, PkiIssueCsrConfig, PkiIssueServerConfig, PkiOperationSummary,
-    SubmitTaskRequest, TaskSpec, TaskState, TerminalGuard, TuiAction, TuiApp,
-    UploadArtifactRequest, WasiValidator,
+    ReplaceStrategy, ReplaceTaskGroupRequest, SubmitTaskGroupRequest, SubmitTaskRequest,
+    TaskGroupSpec, TaskGroupState, TaskPartitionSpec, TaskSpec, TaskState, TaskTemplate,
+    TerminalGuard, TuiAction, TuiApp, UploadArtifactRequest, WasiValidator,
 };
 
 #[derive(Parser, Debug)]
@@ -212,6 +214,131 @@ enum Commands {
     Cert {
         #[command(subcommand)]
         action: CertCommands,
+    },
+
+    /// Partitioned TaskGroup lifecycle and atomic epoch replacement
+    /// Traces to: ADR-006, [REQ-OP-004], [INV-004], [NFR-REL-001]
+    Group {
+        #[command(subcommand)]
+        action: GroupCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum GroupCommands {
+    /// Submit a new partitioned TaskGroup backed by UploadArtifact
+    Submit {
+        /// Unique TaskGroup identifier (^[a-zA-Z0-9_-]{1,64}$)
+        #[arg(long)]
+        group_id: String,
+
+        /// Number of partitions to enqueue (1..=1000)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        partitions: u32,
+
+        /// Path to compiled WebAssembly/WASI module
+        #[arg(long)]
+        wasm: Option<PathBuf>,
+
+        /// WASM entrypoint symbol
+        #[arg(long, default_value = "_start")]
+        entrypoint: String,
+
+        /// Shell command (for ToyboxUser / RootShell groups)
+        #[arg(long)]
+        shell: Option<String>,
+
+        /// Request RootShell execution (requires --allow-insecure-root-tasks on orchestrator)
+        #[arg(long)]
+        root: bool,
+
+        /// Execution timeout in seconds per partition
+        #[arg(long, default_value_t = 120)]
+        timeout: u32,
+
+        /// Restrict scheduling to unmetered Wi-Fi nodes
+        #[arg(long)]
+        requires_unmetered: bool,
+
+        /// Shared environment variables (KEY=VALUE)
+        #[arg(long, value_parser = parse_key_val)]
+        env: Vec<(String, String)>,
+    },
+
+    /// Atomically replace a TaskGroup workload with a new epoch
+    Replace {
+        /// Target TaskGroup identifier
+        #[arg(long)]
+        group_id: String,
+
+        /// Optional optimistic CAS expected epoch
+        #[arg(long)]
+        expected_epoch: Option<u64>,
+
+        /// Rollout strategy: immediate or drain
+        #[arg(long, default_value = "immediate")]
+        strategy: String,
+
+        /// Number of partitions in the new epoch (1..=1000)
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
+        partitions: u32,
+
+        /// Path to compiled WebAssembly/WASI module
+        #[arg(long)]
+        wasm: Option<PathBuf>,
+
+        /// WASM entrypoint symbol
+        #[arg(long, default_value = "_start")]
+        entrypoint: String,
+
+        /// Shell command (for ToyboxUser / RootShell groups)
+        #[arg(long)]
+        shell: Option<String>,
+
+        /// Request RootShell execution
+        #[arg(long)]
+        root: bool,
+
+        /// Execution timeout in seconds per partition
+        #[arg(long, default_value_t = 120)]
+        timeout: u32,
+
+        /// Restrict scheduling to unmetered Wi-Fi nodes
+        #[arg(long)]
+        requires_unmetered: bool,
+
+        /// Shared environment variables (KEY=VALUE)
+        #[arg(long, value_parser = parse_key_val)]
+        env: Vec<(String, String)>,
+    },
+
+    /// Cancel an active or draining TaskGroup
+    Cancel {
+        /// Target TaskGroup identifier
+        #[arg(long)]
+        group_id: String,
+
+        /// Optional optimistic CAS expected epoch
+        #[arg(long)]
+        expected_epoch: Option<u64>,
+    },
+
+    /// Query aggregate status and optional per-partition tasks for a TaskGroup
+    Status {
+        /// Target TaskGroup identifier
+        #[arg(long)]
+        group_id: String,
+
+        /// Include individual partition TaskInfo entries
+        #[arg(long)]
+        include_tasks: bool,
+    },
+
+    /// List all registered TaskGroups
+    List {
+        /// Optional state filter (active, draining, completed, failed, cancelled)
+        #[arg(long)]
+        state: Option<String>,
     },
 }
 
@@ -445,6 +572,18 @@ fn task_state_to_string(state: i32) -> &'static str {
         Ok(TaskState::Failed) => "FAILED",
         Ok(TaskState::Preempted) => "PREEMPTED",
         Ok(TaskState::TimedOut) => "TIMED_OUT",
+        Ok(TaskState::Cancelled) => "CANCELLED",
+        _ => "UNSPECIFIED",
+    }
+}
+
+fn task_group_state_to_string(state: i32) -> &'static str {
+    match TaskGroupState::try_from(state) {
+        Ok(TaskGroupState::Active) => "ACTIVE",
+        Ok(TaskGroupState::Draining) => "DRAINING",
+        Ok(TaskGroupState::Completed) => "COMPLETED",
+        Ok(TaskGroupState::Failed) => "FAILED",
+        Ok(TaskGroupState::Cancelled) => "CANCELLED",
         _ => "UNSPECIFIED",
     }
 }
@@ -728,6 +867,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Benchmark { .. } => unreachable!(),
         Commands::Cert { .. } => unreachable!(),
 
+        Commands::Group { action } => {
+            handle_group_command(&mut client, action, &cli.format).await?;
+        }
+
         Commands::Top { refresh_rate } => {
             run_top(client, &cli.endpoint, refresh_rate).await?;
         }
@@ -824,6 +967,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 artifact_sha256,
                 requires_unmetered,
                 artifact_url: resolved_artifact_url,
+                group_id: String::new(),
+                group_epoch: 0,
             };
 
             let response = client
@@ -1235,6 +1380,385 @@ fn print_cert_summary(
     Ok(())
 }
 
+struct GroupTemplateArgs {
+    wasm: Option<PathBuf>,
+    entrypoint: String,
+    shell: Option<String>,
+    root: bool,
+    timeout: u32,
+    requires_unmetered: bool,
+    env: Vec<(String, String)>,
+}
+
+async fn resolve_group_template(
+    client: &mut AdminServiceClient<tonic::transport::Channel>,
+    args: GroupTemplateArgs,
+) -> Result<TaskTemplate, Box<dyn std::error::Error>> {
+    let GroupTemplateArgs {
+        wasm,
+        entrypoint,
+        shell,
+        root,
+        timeout,
+        requires_unmetered,
+        env,
+    } = args;
+    let (engine, shell_command, artifact_sha256) = if let Some(wasm_path) = wasm {
+        let bytecode = tokio::fs::read(&wasm_path).await.map_err(|e| {
+            format!(
+                "Failed to read WASM bytecode from {}: {e}",
+                wasm_path.display()
+            )
+        })?;
+        let meta = WasiValidator::validate(&bytecode, &entrypoint)
+            .map_err(|e| format!("WASI validation failed: {e}"))?;
+        let sha256_hex = meta.artifact_sha256;
+        client
+            .upload_artifact(UploadArtifactRequest {
+                bytecode,
+                expected_sha256: sha256_hex.clone(),
+            })
+            .await?;
+        (ExecutionEngine::WasmWasi as i32, String::new(), sha256_hex)
+    } else if let Some(cmd) = shell {
+        let engine = if root {
+            ExecutionEngine::RootShell as i32
+        } else {
+            ExecutionEngine::ToyboxUser as i32
+        };
+        (engine, cmd, String::new())
+    } else {
+        return Err("Either --wasm <FILE> or --shell <COMMAND> must be specified.".into());
+    };
+
+    Ok(TaskTemplate {
+        engine,
+        timeout_seconds: timeout,
+        entrypoint,
+        env_vars: env.into_iter().collect(),
+        artifact_sha256,
+        shell_command,
+        requires_unmetered,
+    })
+}
+
+fn build_partitions(count: u32) -> Vec<TaskPartitionSpec> {
+    (0..count)
+        .map(|idx| TaskPartitionSpec {
+            env_overrides: HashMap::from([("PARTITION_INDEX".to_string(), idx.to_string())]),
+        })
+        .collect()
+}
+
+fn parse_group_state_filter(state: Option<&str>) -> Result<i32, String> {
+    match state.map(str::to_ascii_lowercase).as_deref() {
+        None => Ok(TaskGroupState::Unspecified as i32),
+        Some("active") => Ok(TaskGroupState::Active as i32),
+        Some("draining") => Ok(TaskGroupState::Draining as i32),
+        Some("completed") => Ok(TaskGroupState::Completed as i32),
+        Some("failed") => Ok(TaskGroupState::Failed as i32),
+        Some("cancelled") => Ok(TaskGroupState::Cancelled as i32),
+        Some(other) => Err(format!(
+            "Invalid --state '{}'; expected one of: active, draining, completed, failed, cancelled",
+            other
+        )),
+    }
+}
+
+fn format_group_status_output(
+    res: &androgrid_backend::GetTaskGroupStatusResponse,
+    include_tasks: bool,
+    format: &str,
+) -> String {
+    if format == "json" {
+        let mut obj = serde_json::json!({
+            "group_id": res.group_id,
+            "current_epoch": res.current_epoch,
+            "state": task_group_state_to_string(res.state),
+            "total_tasks": res.total_tasks,
+            "pending_tasks": res.pending_tasks,
+            "leased_tasks": res.leased_tasks,
+            "running_tasks": res.running_tasks,
+            "completed_tasks": res.completed_tasks,
+            "failed_tasks": res.failed_tasks,
+            "timed_out_tasks": res.timed_out_tasks,
+            "cancelled_tasks": res.cancelled_tasks,
+            "preempted_tasks": res.preempted_tasks,
+            "previous_epoch_draining_tasks": res.previous_epoch_draining_tasks,
+        });
+        if include_tasks {
+            let tasks: Vec<_> = res
+                .tasks
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "task_id": t.task_id,
+                        "state": task_state_to_string(t.state),
+                        "run_attempt": t.run_attempt,
+                        "assigned_node_id": t.assigned_node_id,
+                        "exit_code": t.exit_code,
+                        "execution_duration_ms": t.execution_duration_ms,
+                        "error_message": t.error_message,
+                    })
+                })
+                .collect();
+            obj["tasks"] = serde_json::Value::Array(tasks);
+        }
+        return obj.to_string();
+    }
+
+    let mut out = format!(
+        "TaskGroup {} [epoch={}, state={}]: total={}, pending={}, leased={}, running={}, completed={}, failed={}, timed_out={}, cancelled={}, preempted={}, draining_prev={}",
+        res.group_id,
+        res.current_epoch,
+        task_group_state_to_string(res.state),
+        res.total_tasks,
+        res.pending_tasks,
+        res.leased_tasks,
+        res.running_tasks,
+        res.completed_tasks,
+        res.failed_tasks,
+        res.timed_out_tasks,
+        res.cancelled_tasks,
+        res.preempted_tasks,
+        res.previous_epoch_draining_tasks
+    );
+    if include_tasks {
+        for t in &res.tasks {
+            out.push_str(&format!(
+                "\n  - {} [{}] attempt={} node={} exit_code={}",
+                t.task_id,
+                task_state_to_string(t.state),
+                t.run_attempt,
+                if t.assigned_node_id.is_empty() {
+                    "-"
+                } else {
+                    t.assigned_node_id.as_str()
+                },
+                t.exit_code
+            ));
+        }
+    }
+    out
+}
+
+async fn handle_group_command(
+    client: &mut AdminServiceClient<tonic::transport::Channel>,
+    action: GroupCommands,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        GroupCommands::Submit {
+            group_id,
+            partitions,
+            wasm,
+            entrypoint,
+            shell,
+            root,
+            timeout,
+            requires_unmetered,
+            env,
+        } => {
+            let template = resolve_group_template(
+                client,
+                GroupTemplateArgs {
+                    wasm,
+                    entrypoint,
+                    shell,
+                    root,
+                    timeout,
+                    requires_unmetered,
+                    env,
+                },
+            )
+            .await?;
+            let res = client
+                .submit_task_group(SubmitTaskGroupRequest {
+                    group: Some(TaskGroupSpec {
+                        group_id,
+                        template: Some(template),
+                        partitions: build_partitions(partitions),
+                    }),
+                })
+                .await?
+                .into_inner();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "accepted": res.accepted,
+                        "group_id": res.group_id,
+                        "group_epoch": res.group_epoch,
+                        "total_tasks": res.total_tasks,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!(
+                    "TaskGroup {} accepted (epoch={}, total_tasks={})",
+                    res.group_id, res.group_epoch, res.total_tasks
+                );
+            }
+        }
+        GroupCommands::Replace {
+            group_id,
+            expected_epoch,
+            strategy,
+            partitions,
+            wasm,
+            entrypoint,
+            shell,
+            root,
+            timeout,
+            requires_unmetered,
+            env,
+        } => {
+            let strat = match strategy.to_ascii_lowercase().as_str() {
+                "immediate" => ReplaceStrategy::Immediate as i32,
+                "drain" => ReplaceStrategy::Drain as i32,
+                other => {
+                    return Err(format!(
+                        "Unsupported strategy '{}'; expected 'immediate' or 'drain'",
+                        other
+                    )
+                    .into());
+                }
+            };
+            let template = resolve_group_template(
+                client,
+                GroupTemplateArgs {
+                    wasm,
+                    entrypoint,
+                    shell,
+                    root,
+                    timeout,
+                    requires_unmetered,
+                    env,
+                },
+            )
+            .await?;
+            let res = client
+                .replace_task_group(ReplaceTaskGroupRequest {
+                    group_id,
+                    expected_epoch,
+                    template: Some(template),
+                    partitions: build_partitions(partitions),
+                    strategy: strat,
+                })
+                .await?
+                .into_inner();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "accepted": res.accepted,
+                        "group_id": res.group_id,
+                        "new_epoch": res.new_epoch,
+                        "state": task_group_state_to_string(res.state),
+                        "cancelled_tasks": res.cancelled_tasks,
+                        "draining_tasks": res.draining_tasks,
+                        "created_tasks": res.created_tasks,
+                    })
+                );
+            } else {
+                println!(
+                    "TaskGroup {} replaced (epoch={}, state={}, created={}, cancelled={}, draining={})",
+                    res.group_id,
+                    res.new_epoch,
+                    task_group_state_to_string(res.state),
+                    res.created_tasks,
+                    res.cancelled_tasks,
+                    res.draining_tasks
+                );
+            }
+        }
+        GroupCommands::Cancel {
+            group_id,
+            expected_epoch,
+        } => {
+            let res = client
+                .cancel_task_group(CancelTaskGroupRequest {
+                    group_id,
+                    expected_epoch,
+                })
+                .await?
+                .into_inner();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "cancelled": res.cancelled,
+                        "group_id": res.group_id,
+                        "epoch": res.epoch,
+                        "cancelled_tasks": res.cancelled_tasks,
+                    })
+                );
+            } else {
+                println!(
+                    "TaskGroup {} cancelled (epoch={}, cancelled_tasks={})",
+                    res.group_id, res.epoch, res.cancelled_tasks
+                );
+            }
+        }
+        GroupCommands::Status {
+            group_id,
+            include_tasks,
+        } => {
+            let res = client
+                .get_task_group_status(GetTaskGroupStatusRequest {
+                    group_id,
+                    include_tasks,
+                })
+                .await?
+                .into_inner();
+            println!(
+                "{}",
+                format_group_status_output(&res, include_tasks, format)
+            );
+        }
+        GroupCommands::List { state } => {
+            let state_filter = parse_group_state_filter(state.as_deref())
+                .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
+            let res = client
+                .list_task_groups(ListTaskGroupsRequest { state_filter })
+                .await?
+                .into_inner();
+            if format == "json" {
+                let items: Vec<_> = res
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        serde_json::json!({
+                            "group_id": g.group_id,
+                            "current_epoch": g.current_epoch,
+                            "state": task_group_state_to_string(g.state),
+                            "total_tasks": g.total_tasks,
+                            "completed_tasks": g.completed_tasks,
+                            "failed_tasks": g.failed_tasks,
+                            "cancelled_tasks": g.cancelled_tasks,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if res.groups.is_empty() {
+                println!("No TaskGroups registered.");
+            } else {
+                for g in &res.groups {
+                    println!(
+                        "{}  epoch={}  state={}  {}/{} completed",
+                        g.group_id,
+                        g.current_epoch,
+                        task_group_state_to_string(g.state),
+                        g.completed_tasks,
+                        g.total_tasks
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1274,7 +1798,59 @@ mod tests {
             task_state_to_string(TaskState::TimedOut as i32),
             "TIMED_OUT"
         );
+        assert_eq!(
+            task_state_to_string(TaskState::Cancelled as i32),
+            "CANCELLED"
+        );
         assert_eq!(task_state_to_string(999), "UNSPECIFIED");
+    }
+
+    #[test]
+    fn test_cli_parse_group_commands() {
+        let sub = Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "submit",
+            "--group-id",
+            "g1",
+            "--partitions",
+            "4",
+            "--wasm",
+            "mod.wasm",
+        ])
+        .expect("group submit parse should succeed");
+        assert!(matches!(
+            sub.command,
+            Commands::Group {
+                action: GroupCommands::Submit { partitions: 4, .. }
+            }
+        ));
+
+        let rep = Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "replace",
+            "--group-id",
+            "g1",
+            "--expected-epoch",
+            "1",
+            "--strategy",
+            "drain",
+            "--partitions",
+            "2",
+            "--wasm",
+            "mod_v2.wasm",
+        ])
+        .expect("group replace parse should succeed");
+        assert!(matches!(
+            rep.command,
+            Commands::Group {
+                action: GroupCommands::Replace {
+                    expected_epoch: Some(1),
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]
@@ -1729,5 +2305,80 @@ mod tests {
         assert!(rotated.join("server.crt").exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_group_cli_validation_and_status_include_tasks() {
+        assert!(Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "submit",
+            "--group-id",
+            "g1",
+            "--partitions",
+            "0",
+            "--shell",
+            "echo hi"
+        ])
+        .is_err());
+        assert!(Cli::try_parse_from([
+            "androgrid-cli",
+            "group",
+            "replace",
+            "--group-id",
+            "g1",
+            "--partitions",
+            "1001",
+            "--shell",
+            "echo hi"
+        ])
+        .is_err());
+
+        assert_eq!(
+            parse_group_state_filter(None).unwrap(),
+            TaskGroupState::Unspecified as i32
+        );
+        assert_eq!(
+            parse_group_state_filter(Some("ACTIVE")).unwrap(),
+            TaskGroupState::Active as i32
+        );
+        assert!(parse_group_state_filter(Some("running")).is_err());
+
+        let status_res = androgrid_backend::GetTaskGroupStatusResponse {
+            group_id: "g1".to_string(),
+            current_epoch: 2,
+            state: TaskGroupState::Draining as i32,
+            total_tasks: 2,
+            pending_tasks: 1,
+            leased_tasks: 0,
+            running_tasks: 1,
+            completed_tasks: 0,
+            failed_tasks: 0,
+            timed_out_tasks: 0,
+            cancelled_tasks: 0,
+            preempted_tasks: 0,
+            previous_epoch_draining_tasks: 1,
+            tasks: vec![androgrid_backend::TaskInfo {
+                task_id: "g1:e2:p0".to_string(),
+                state: TaskState::Running as i32,
+                run_attempt: 1,
+                assigned_node_id: "wifi-1".to_string(),
+                exit_code: 0,
+                execution_duration_ms: 42,
+                error_message: String::new(),
+                ..Default::default()
+            }],
+        };
+
+        let json_out = format_group_status_output(&status_res, true, "json");
+        let parsed: serde_json::Value = serde_json::from_str(&json_out).unwrap();
+        assert_eq!(parsed["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["tasks"][0]["task_id"], "g1:e2:p0");
+
+        let text_out = format_group_status_output(&status_res, true, "text");
+        assert!(text_out.contains("running=1"));
+        assert!(text_out.contains("timed_out=0"));
+        assert!(text_out.contains("preempted=0"));
+        assert!(text_out.contains("g1:e2:p0 [RUNNING]"));
     }
 }

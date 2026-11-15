@@ -8,13 +8,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::scheduler::errors::SchedulingError;
-use crate::scheduler::state::{TaskExecutionResult, TaskRecord, WorkerRecord};
+use crate::scheduler::state::{TaskExecutionResult, TaskGroupRecord, TaskRecord, WorkerRecord};
 use crate::scheduler::thermal::{ThermalAction, ThermalPolicy};
 use crate::{
-    ClaimCellularTaskResponse, ExecutionEngine, NetworkTransportType, NodeCapabilities,
-    RegisterNodeResponse, SubmitCellularResultResponse, SyncNodeStateResponse, TaskExecutionReport,
-    TaskSpec, TaskState,
+    CancelTaskGroupResponse, ClaimCellularTaskResponse, ExecutionEngine,
+    GetTaskGroupStatusResponse, NetworkTransportType, NodeCapabilities, RegisterNodeResponse,
+    ReplaceStrategy, ReplaceTaskGroupRequest, ReplaceTaskGroupResponse,
+    SubmitCellularResultResponse, SubmitTaskGroupResponse, SyncNodeStateResponse,
+    TaskExecutionReport, TaskGroupSpec, TaskGroupState, TaskGroupSummary, TaskPartitionSpec,
+    TaskSpec, TaskState, TaskTemplate,
 };
+
+/// Maximum number of partitions allowed in a single TaskGroup submission or replacement.
+pub const MAX_GROUP_PARTITIONS: usize = 1000;
 
 /// Default maximum allowable task duration on cellular spot connections (180 seconds).
 /// Traces to: [INV-005], [ANTI-003]
@@ -47,6 +53,8 @@ impl Default for ClusterScheduler {
 struct SchedulerInner {
     tasks: HashMap<String, TaskRecord>,
     workers: HashMap<String, WorkerRecord>,
+    groups: HashMap<String, TaskGroupRecord>,
+    pending_cancellations: HashMap<String, Vec<String>>,
     allow_insecure_root_tasks: bool,
     thermal_policy: ThermalPolicy,
 }
@@ -66,6 +74,8 @@ impl ClusterScheduler {
             inner: Arc::new(RwLock::new(SchedulerInner {
                 tasks: HashMap::new(),
                 workers: HashMap::new(),
+                groups: HashMap::new(),
+                pending_cancellations: HashMap::new(),
                 allow_insecure_root_tasks,
                 thermal_policy,
             })),
@@ -194,6 +204,18 @@ impl ClusterScheduler {
     pub fn submit_task(&self, spec: TaskSpec) -> Result<(), SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         let task_id = spec.task_id.clone();
+        if is_reserved_group_task_id(&task_id) {
+            return Err(SchedulingError::TaskIdCollision(format!(
+                "task_id '{}' uses reserved TaskGroup partition format '<group>:e<epoch>:p<index>'",
+                task_id
+            )));
+        }
+        if inner.tasks.contains_key(&task_id) {
+            return Err(SchedulingError::TaskIdCollision(format!(
+                "task_id '{}' already exists",
+                task_id
+            )));
+        }
         let engine_str = match spec.engine {
             1 => "WasmWasi",
             2 => "RootShell",
@@ -405,10 +427,19 @@ impl ClusterScheduler {
 
         let mut acknowledged_ids = Vec::new();
         let mut transition_events = Vec::new();
+        let mut touched_groups = Vec::new();
 
         // Process completed reports submitted via Wi-Fi
         for report in completed_reports {
             if let Some(task) = inner.tasks.get_mut(&report.task_id) {
+                // [CR-02]: If task was already cancelled/superseded, drop the result
+                // but acknowledge the task_id so the Wi-Fi worker stops retrying
+                // without failing healthy tasks in the same SyncNodeState batch.
+                if task.state == TaskState::Cancelled {
+                    acknowledged_ids.push(report.task_id.clone());
+                    continue;
+                }
+
                 if task.active_attempt == report.run_attempt
                     && (task.state == TaskState::Leased || task.state == TaskState::Preempted)
                 {
@@ -428,6 +459,9 @@ impl ClusterScheduler {
                         committed_attempt: report.run_attempt,
                     });
                     acknowledged_ids.push(report.task_id.clone());
+                    if let Some(gid) = &task.group_id {
+                        touched_groups.push(gid.clone());
+                    }
 
                     if report.exit_code == 0 {
                         transition_events.push(crate::observability::ClusterEvent::TaskCompleted {
@@ -513,6 +547,15 @@ impl ClusterScheduler {
             }
         }
 
+        for gid in touched_groups {
+            reconcile_group_state(&mut inner, &gid, now_epoch_ms);
+        }
+
+        let cancel_task_ids = inner
+            .pending_cancellations
+            .remove(node_id)
+            .unwrap_or_default();
+
         drop(inner);
         for ev in transition_events {
             self.emit_event(ev);
@@ -521,7 +564,7 @@ impl ClusterScheduler {
         Ok(SyncNodeStateResponse {
             server_epoch_ms: now_epoch_ms,
             desired_tasks,
-            cancel_task_ids: Vec::new(),
+            cancel_task_ids,
             acknowledged_task_ids: acknowledged_ids,
         })
     }
@@ -535,15 +578,34 @@ impl ClusterScheduler {
     ) -> Result<SubmitCellularResultResponse, SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
+        // Check if task was cancelled due to a newer TaskGroup epoch before mutating.
+        if let Some(task) = inner.tasks.get(&request.task_id) {
+            if task.state == TaskState::Cancelled {
+                if let (Some(gid), Some(task_epoch)) = (&task.group_id, task.group_epoch) {
+                    if let Some(group) = inner.groups.get(gid) {
+                        if task_epoch < group.group_epoch {
+                            return Err(SchedulingError::GroupSuperseded {
+                                task_id: request.task_id.clone(),
+                                group_id: gid.clone(),
+                                task_epoch,
+                                active_epoch: group.group_epoch,
+                            });
+                        }
+                    }
+                }
+                return Err(SchedulingError::TaskCancelled(request.task_id.clone()));
+            }
+            if is_terminal_task_state(task.state) {
+                return Err(SchedulingError::AlreadyFinalized(request.task_id.clone()));
+            }
+        } else {
+            return Err(SchedulingError::TaskNotFound(request.task_id.clone()));
+        }
+
         let task = inner
             .tasks
             .get_mut(&request.task_id)
-            .ok_or_else(|| SchedulingError::TaskNotFound(request.task_id.clone()))?;
-
-        // If task is already finalized in Completed or Failed state, reject attempt
-        if task.state == TaskState::Completed || task.state == TaskState::Failed {
-            return Err(SchedulingError::AlreadyFinalized(request.task_id.clone()));
-        }
+            .expect("task existence verified above");
 
         // [INV-004]: Atomic monotonic fencing check
         // Submissions bearing run_attempt strictly lower than the latest committed state MUST be dropped
@@ -572,6 +634,15 @@ impl ClusterScheduler {
             committed_by_node_id: request.node_id.clone(),
             committed_attempt: request.run_attempt,
         });
+
+        let committed_group_id = task.group_id.clone();
+        if let Some(gid) = committed_group_id {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            reconcile_group_state(&mut inner, &gid, now_ms);
+        }
 
         drop(inner);
 
@@ -630,6 +701,7 @@ impl ClusterScheduler {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         let mut expired = Vec::new();
 
+        let mut touched_groups = Vec::new();
         for (id, task) in inner.tasks.iter_mut() {
             if (task.state == TaskState::Leased || task.state == TaskState::Preempted)
                 && task.lease_deadline_epoch_s > 0
@@ -637,7 +709,13 @@ impl ClusterScheduler {
             {
                 task.state = TaskState::TimedOut;
                 expired.push(id.clone());
+                if let Some(gid) = &task.group_id {
+                    touched_groups.push(gid.clone());
+                }
             }
+        }
+        for gid in touched_groups {
+            reconcile_group_state(&mut inner, &gid, now_epoch_s * 1000);
         }
 
         drop(inner);
@@ -777,6 +855,7 @@ impl ClusterScheduler {
         let mut failed_tasks = 0;
         let mut preempted_tasks = 0;
         let mut timed_out_tasks = 0;
+        let mut cancelled_tasks = 0;
 
         let tasks: Vec<crate::observability::TaskSnapshot> = inner
             .tasks
@@ -810,6 +889,10 @@ impl ClusterScheduler {
                     TaskState::TimedOut => {
                         timed_out_tasks += 1;
                         "TimedOut"
+                    }
+                    TaskState::Cancelled => {
+                        cancelled_tasks += 1;
+                        "Cancelled"
                     }
                     _ => "Unknown",
                 }
@@ -864,6 +947,7 @@ impl ClusterScheduler {
             failed_tasks,
             preempted_tasks,
             timed_out_tasks,
+            cancelled_tasks,
         };
 
         crate::observability::ClusterSnapshot {
@@ -884,11 +968,16 @@ impl ClusterScheduler {
             .get_mut(task_id)
             .ok_or_else(|| SchedulingError::TaskNotFound(task_id.to_string()))?;
 
-        if task.state == TaskState::Completed
-            || task.state == TaskState::Failed
-            || task.state == TaskState::TimedOut
-        {
+        if is_terminal_task_state(task.state) {
             return Err(SchedulingError::AlreadyFinalized(task_id.to_string()));
+        }
+
+        if task.group_id.is_some() {
+            return Err(SchedulingError::InvalidStateTransition {
+                task_id: task_id.to_string(),
+                from: format!("{:?}", task.state),
+                to: "Cancelled (use CancelTaskGroup for group-owned tasks)".to_string(),
+            });
         }
 
         task.state = TaskState::Failed;
@@ -902,6 +991,10 @@ impl ClusterScheduler {
             committed_by_node_id: "operator".to_string(),
             committed_attempt: task.active_attempt,
         });
+        let cancelled_group_id = task.group_id.clone();
+        if let Some(gid) = cancelled_group_id {
+            reconcile_group_state(&mut inner, &gid, 0);
+        }
 
         drop(inner);
         self.emit_event(crate::observability::ClusterEvent::TaskCancelled {
@@ -923,6 +1016,619 @@ impl ClusterScheduler {
             .tasks
             .get(task_id)
             .map(|t| (t.state, t.active_attempt, t.result.clone()))
+    }
+
+    /// Atomically admits a partitioned TaskGroup at epoch 1.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004], [INV-006], [NFR-PERF-001]
+    pub fn submit_task_group(
+        &self,
+        group: TaskGroupSpec,
+        now_epoch_ms: u64,
+    ) -> Result<SubmitTaskGroupResponse, SchedulingError> {
+        validate_group_id(&group.group_id)?;
+        validate_partitions(&group.partitions)?;
+        let template = group.template.ok_or_else(|| {
+            SchedulingError::InvalidGroupPartitions("template is required".to_string())
+        })?;
+        validate_task_template(&template)?;
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
+        {
+            return Err(SchedulingError::RootShellExecutionDisabled);
+        }
+        if inner.groups.contains_key(&group.group_id) {
+            return Err(SchedulingError::GroupAlreadyExists(group.group_id));
+        }
+
+        let epoch = 1u64;
+        let total = group.partitions.len();
+        let mut task_ids = Vec::with_capacity(total);
+        inner.tasks.reserve(total);
+
+        for (idx, part) in group.partitions.iter().enumerate() {
+            let record = build_partition_task_record(&group.group_id, epoch, idx, &template, part);
+            let tid = record.spec.task_id.clone();
+            if inner.tasks.contains_key(&tid) {
+                return Err(SchedulingError::TaskIdCollision(format!(
+                    "partition task_id '{}' already exists",
+                    tid
+                )));
+            }
+            task_ids.push(tid.clone());
+            inner.tasks.insert(tid, record);
+        }
+
+        inner.groups.insert(
+            group.group_id.clone(),
+            TaskGroupRecord {
+                group_id: group.group_id.clone(),
+                group_epoch: epoch,
+                state: TaskGroupState::Active,
+                template,
+                current_task_ids: task_ids,
+                draining_task_ids: Vec::new(),
+                created_at_epoch_ms: now_epoch_ms,
+                updated_at_epoch_ms: now_epoch_ms,
+            },
+        );
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupSubmitted {
+            group_id: group.group_id.clone(),
+            group_epoch: epoch,
+            total_tasks: total as u32,
+        });
+
+        Ok(SubmitTaskGroupResponse {
+            accepted: true,
+            group_id: group.group_id,
+            group_epoch: epoch,
+            total_tasks: total as u32,
+            message: "TaskGroup accepted and enqueued".to_string(),
+        })
+    }
+
+    /// Atomically replaces a TaskGroup with a new epoch using IMMEDIATE or DRAIN strategy.
+    ///
+    /// Traces to: [INV-004], [NFR-REL-001], [INV-006]
+    pub fn replace_task_group(
+        &self,
+        req: ReplaceTaskGroupRequest,
+        now_epoch_ms: u64,
+    ) -> Result<ReplaceTaskGroupResponse, SchedulingError> {
+        validate_group_id(&req.group_id)?;
+        validate_partitions(&req.partitions)?;
+        let template = req.template.ok_or_else(|| {
+            SchedulingError::InvalidGroupPartitions("template is required".to_string())
+        })?;
+        validate_task_template(&template)?;
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
+        {
+            return Err(SchedulingError::RootShellExecutionDisabled);
+        }
+
+        let (current_epoch, current_state, prev_current_ids, prev_draining_ids) = {
+            let group = inner
+                .groups
+                .get(&req.group_id)
+                .ok_or_else(|| SchedulingError::GroupNotFound(req.group_id.clone()))?;
+            (
+                group.group_epoch,
+                group.state,
+                group.current_task_ids.clone(),
+                group.draining_task_ids.clone(),
+            )
+        };
+
+        if current_state == TaskGroupState::Cancelled
+            || current_state == TaskGroupState::Completed
+            || current_state == TaskGroupState::Failed
+        {
+            return Err(SchedulingError::GroupTerminal(req.group_id));
+        }
+
+        if let Some(expected) = req.expected_epoch {
+            if expected != current_epoch {
+                return Err(SchedulingError::GroupEpochConflict {
+                    group_id: req.group_id,
+                    expected,
+                    actual: current_epoch,
+                });
+            }
+        }
+
+        let strategy =
+            ReplaceStrategy::try_from(req.strategy).unwrap_or(ReplaceStrategy::Immediate);
+        let is_drain = strategy == ReplaceStrategy::Drain;
+        let new_epoch = current_epoch + 1;
+
+        let mut cancelled_count = 0u32;
+        let mut draining_ids = Vec::new();
+
+        // Force-cancel any leftover tasks from an even older draining epoch so only
+        // at most one previous epoch is ever draining concurrently.
+        for tid in prev_draining_ids {
+            if let Some(task) = inner.tasks.get(&tid).cloned() {
+                if !is_terminal_task_state(task.state) {
+                    queue_wifi_cancel(&mut inner, &task);
+                    if let Some(t) = inner.tasks.get_mut(&tid) {
+                        t.state = TaskState::Cancelled;
+                    }
+                    cancelled_count += 1;
+                }
+            }
+        }
+
+        for tid in prev_current_ids {
+            if let Some(task_snapshot) = inner.tasks.get(&tid).cloned() {
+                if is_terminal_task_state(task_snapshot.state) {
+                    continue;
+                }
+                if is_drain
+                    && (task_snapshot.state == TaskState::Leased
+                        || task_snapshot.state == TaskState::Preempted
+                        || task_snapshot.state == TaskState::Running)
+                {
+                    draining_ids.push(tid);
+                } else {
+                    if task_snapshot.state != TaskState::Pending {
+                        queue_wifi_cancel(&mut inner, &task_snapshot);
+                    }
+                    if let Some(t) = inner.tasks.get_mut(&tid) {
+                        t.state = TaskState::Cancelled;
+                    }
+                    cancelled_count += 1;
+                }
+            }
+        }
+
+        let created_count = req.partitions.len();
+        let mut new_task_ids = Vec::with_capacity(created_count);
+        inner.tasks.reserve(created_count);
+        for (idx, part) in req.partitions.iter().enumerate() {
+            let record =
+                build_partition_task_record(&req.group_id, new_epoch, idx, &template, part);
+            let tid = record.spec.task_id.clone();
+            new_task_ids.push(tid.clone());
+            inner.tasks.insert(tid, record);
+        }
+
+        let draining_count = draining_ids.len() as u32;
+        let new_state = if draining_count > 0 {
+            TaskGroupState::Draining
+        } else {
+            TaskGroupState::Active
+        };
+
+        if let Some(group) = inner.groups.get_mut(&req.group_id) {
+            group.group_epoch = new_epoch;
+            group.state = new_state;
+            group.template = template;
+            group.current_task_ids = new_task_ids;
+            group.draining_task_ids = draining_ids;
+            group.updated_at_epoch_ms = now_epoch_ms;
+        }
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupReplaced {
+            group_id: req.group_id.clone(),
+            new_epoch,
+            cancelled_tasks: cancelled_count,
+            draining_tasks: draining_count,
+            created_tasks: created_count as u32,
+        });
+
+        Ok(ReplaceTaskGroupResponse {
+            accepted: true,
+            group_id: req.group_id,
+            new_epoch,
+            state: new_state as i32,
+            cancelled_tasks: cancelled_count,
+            draining_tasks: draining_count,
+            created_tasks: created_count as u32,
+            message: format!("TaskGroup replaced at epoch {}", new_epoch),
+        })
+    }
+
+    /// Cancels a TaskGroup and all non-terminal tasks across current and draining epochs.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004]
+    pub fn cancel_task_group(
+        &self,
+        group_id: &str,
+        expected_epoch: Option<u64>,
+        now_epoch_ms: u64,
+    ) -> Result<CancelTaskGroupResponse, SchedulingError> {
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        let (epoch, state, all_task_ids) = {
+            let group = inner
+                .groups
+                .get(group_id)
+                .ok_or_else(|| SchedulingError::GroupNotFound(group_id.to_string()))?;
+            let mut ids = group.current_task_ids.clone();
+            ids.extend(group.draining_task_ids.iter().cloned());
+            (group.group_epoch, group.state, ids)
+        };
+
+        if state == TaskGroupState::Cancelled
+            || state == TaskGroupState::Completed
+            || state == TaskGroupState::Failed
+        {
+            return Err(SchedulingError::GroupTerminal(group_id.to_string()));
+        }
+
+        if let Some(expected) = expected_epoch {
+            if expected != epoch {
+                return Err(SchedulingError::GroupEpochConflict {
+                    group_id: group_id.to_string(),
+                    expected,
+                    actual: epoch,
+                });
+            }
+        }
+
+        let mut cancelled_count = 0u32;
+        for tid in all_task_ids {
+            if let Some(task_snapshot) = inner.tasks.get(&tid).cloned() {
+                if !is_terminal_task_state(task_snapshot.state) {
+                    if task_snapshot.state != TaskState::Pending {
+                        queue_wifi_cancel(&mut inner, &task_snapshot);
+                    }
+                    if let Some(t) = inner.tasks.get_mut(&tid) {
+                        t.state = TaskState::Cancelled;
+                    }
+                    cancelled_count += 1;
+                }
+            }
+        }
+
+        if let Some(group) = inner.groups.get_mut(group_id) {
+            group.state = TaskGroupState::Cancelled;
+            group.draining_task_ids.clear();
+            group.updated_at_epoch_ms = now_epoch_ms;
+        }
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupCancelled {
+            group_id: group_id.to_string(),
+            epoch,
+            cancelled_tasks: cancelled_count,
+        });
+
+        Ok(CancelTaskGroupResponse {
+            cancelled: true,
+            group_id: group_id.to_string(),
+            epoch,
+            cancelled_tasks: cancelled_count,
+            message: "TaskGroup cancelled".to_string(),
+        })
+    }
+
+    /// Retrieves aggregate status counters and optional per-partition TaskInfo records.
+    ///
+    /// Traces to: [REQ-OP-004], [NFR-PERF-001]
+    pub fn get_task_group_status(
+        &self,
+        group_id: &str,
+        include_tasks: bool,
+    ) -> Result<GetTaskGroupStatusResponse, SchedulingError> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        let group = inner
+            .groups
+            .get(group_id)
+            .ok_or_else(|| SchedulingError::GroupNotFound(group_id.to_string()))?;
+
+        let mut pending = 0u32;
+        let mut leased = 0u32;
+        let mut running = 0u32;
+        let mut completed = 0u32;
+        let mut failed = 0u32;
+        let mut timed_out = 0u32;
+        let mut cancelled = 0u32;
+        let mut preempted = 0u32;
+        let mut tasks_out = if include_tasks {
+            Vec::with_capacity(group.current_task_ids.len())
+        } else {
+            Vec::new()
+        };
+
+        for tid in &group.current_task_ids {
+            if let Some(t) = inner.tasks.get(tid) {
+                match t.state {
+                    TaskState::Pending => pending += 1,
+                    TaskState::Leased => leased += 1,
+                    TaskState::Running => running += 1,
+                    TaskState::Completed => completed += 1,
+                    TaskState::Failed => failed += 1,
+                    TaskState::TimedOut => timed_out += 1,
+                    TaskState::Cancelled => cancelled += 1,
+                    TaskState::Preempted => preempted += 1,
+                    TaskState::Unspecified => {}
+                }
+                if include_tasks {
+                    tasks_out.push(task_record_to_info(t));
+                }
+            }
+        }
+
+        let draining_active = group
+            .draining_task_ids
+            .iter()
+            .filter(|tid| {
+                inner
+                    .tasks
+                    .get(*tid)
+                    .map(|t| !is_terminal_task_state(t.state))
+                    .unwrap_or(false)
+            })
+            .count() as u32;
+
+        Ok(GetTaskGroupStatusResponse {
+            group_id: group.group_id.clone(),
+            current_epoch: group.group_epoch,
+            state: group.state as i32,
+            total_tasks: group.current_task_ids.len() as u32,
+            pending_tasks: pending,
+            leased_tasks: leased,
+            running_tasks: running,
+            completed_tasks: completed,
+            failed_tasks: failed,
+            timed_out_tasks: timed_out,
+            cancelled_tasks: cancelled,
+            preempted_tasks: preempted,
+            previous_epoch_draining_tasks: draining_active,
+            tasks: tasks_out,
+        })
+    }
+
+    /// Lists all registered TaskGroups, optionally filtered by TaskGroupState.
+    ///
+    /// Traces to: [REQ-OP-004]
+    pub fn list_task_groups(&self, state_filter: Option<TaskGroupState>) -> Vec<TaskGroupSummary> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        let mut summaries = Vec::new();
+        for group in inner.groups.values() {
+            if let Some(filter) = state_filter {
+                if filter != TaskGroupState::Unspecified && group.state != filter {
+                    continue;
+                }
+            }
+            let mut completed = 0u32;
+            let mut failed = 0u32;
+            let mut cancelled = 0u32;
+            for tid in &group.current_task_ids {
+                if let Some(t) = inner.tasks.get(tid) {
+                    match t.state {
+                        TaskState::Completed => completed += 1,
+                        TaskState::Failed | TaskState::TimedOut => failed += 1,
+                        TaskState::Cancelled => cancelled += 1,
+                        _ => {}
+                    }
+                }
+            }
+            summaries.push(TaskGroupSummary {
+                group_id: group.group_id.clone(),
+                current_epoch: group.group_epoch,
+                state: group.state as i32,
+                total_tasks: group.current_task_ids.len() as u32,
+                completed_tasks: completed,
+                failed_tasks: failed,
+                cancelled_tasks: cancelled,
+            });
+        }
+        summaries.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        summaries
+    }
+}
+
+fn is_terminal_task_state(state: TaskState) -> bool {
+    matches!(
+        state,
+        TaskState::Completed | TaskState::Failed | TaskState::TimedOut | TaskState::Cancelled
+    )
+}
+
+fn validate_group_id(group_id: &str) -> Result<(), SchedulingError> {
+    if group_id.is_empty()
+        || group_id.len() > 64
+        || !group_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err(SchedulingError::InvalidGroupId(group_id.to_string()));
+    }
+    Ok(())
+}
+
+fn validate_partitions(partitions: &[TaskPartitionSpec]) -> Result<(), SchedulingError> {
+    if partitions.is_empty() {
+        return Err(SchedulingError::InvalidGroupPartitions(
+            "partitions must not be empty".to_string(),
+        ));
+    }
+    if partitions.len() > MAX_GROUP_PARTITIONS {
+        return Err(SchedulingError::InvalidGroupPartitions(format!(
+            "partitions count {} exceeds MAX_GROUP_PARTITIONS ({})",
+            partitions.len(),
+            MAX_GROUP_PARTITIONS
+        )));
+    }
+    Ok(())
+}
+
+fn validate_task_template(template: &TaskTemplate) -> Result<(), SchedulingError> {
+    let engine = ExecutionEngine::try_from(template.engine).map_err(|_| {
+        SchedulingError::InvalidTaskTemplate(format!(
+            "unknown execution engine {}",
+            template.engine
+        ))
+    })?;
+    match engine {
+        ExecutionEngine::WasmWasi => {}
+        ExecutionEngine::ToyboxUser | ExecutionEngine::RootShell => {
+            if template.shell_command.trim().is_empty() {
+                return Err(SchedulingError::InvalidTaskTemplate(
+                    "shell_command must not be empty for shell execution engines".to_string(),
+                ));
+            }
+        }
+        ExecutionEngine::Unspecified => {
+            return Err(SchedulingError::InvalidTaskTemplate(
+                "execution engine must be WasmWasi, ToyboxUser, or RootShell".to_string(),
+            ));
+        }
+    }
+    if template.timeout_seconds == 0 {
+        return Err(SchedulingError::InvalidTaskTemplate(
+            "timeout_seconds must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_reserved_group_task_id(task_id: &str) -> bool {
+    let mut parts = task_id.rsplitn(3, ':');
+    let (Some(p_part), Some(e_part), Some(g_part)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !g_part.is_empty()
+        && e_part.starts_with('e')
+        && e_part.len() > 1
+        && e_part[1..].bytes().all(|b| b.is_ascii_digit())
+        && p_part.starts_with('p')
+        && p_part.len() > 1
+        && p_part[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+#[allow(deprecated)]
+fn build_partition_task_record(
+    group_id: &str,
+    epoch: u64,
+    index: usize,
+    template: &TaskTemplate,
+    partition: &TaskPartitionSpec,
+) -> TaskRecord {
+    let mut env_vars = template.env_vars.clone();
+    for (k, v) in &partition.env_overrides {
+        env_vars.insert(k.clone(), v.clone());
+    }
+    let task_id = format!("{}:e{}:p{}", group_id, epoch, index);
+    TaskRecord::new(TaskSpec {
+        task_id,
+        run_attempt: 0,
+        engine: template.engine,
+        timeout_seconds: template.timeout_seconds,
+        entrypoint: template.entrypoint.clone(),
+        env_vars,
+        wasm_bytecode: Vec::new(),
+        shell_command: template.shell_command.clone(),
+        artifact_sha256: template.artifact_sha256.clone(),
+        requires_unmetered: template.requires_unmetered,
+        artifact_url: String::new(),
+        group_id: group_id.to_string(),
+        group_epoch: epoch,
+    })
+}
+
+fn queue_wifi_cancel(inner: &mut SchedulerInner, task: &TaskRecord) {
+    for node_id in [&task.assigned_node_id, &task.speculative_node_id]
+        .into_iter()
+        .flatten()
+    {
+        let queue = inner
+            .pending_cancellations
+            .entry(node_id.clone())
+            .or_default();
+        if !queue.contains(&task.spec.task_id) {
+            queue.push(task.spec.task_id.clone());
+        }
+    }
+}
+
+fn reconcile_group_state(inner: &mut SchedulerInner, group_id: &str, now_epoch_ms: u64) {
+    let Some(group) = inner.groups.get(group_id) else {
+        return;
+    };
+    if group.state == TaskGroupState::Cancelled {
+        return;
+    }
+
+    let current_ids = group.current_task_ids.clone();
+    let mut draining_ids = group.draining_task_ids.clone();
+    draining_ids.retain(|tid| {
+        inner
+            .tasks
+            .get(tid)
+            .map(|t| !is_terminal_task_state(t.state))
+            .unwrap_or(false)
+    });
+
+    let mut all_terminal = true;
+    let mut any_failed = false;
+    let mut all_cancelled = !current_ids.is_empty();
+
+    for tid in &current_ids {
+        if let Some(t) = inner.tasks.get(tid) {
+            if !is_terminal_task_state(t.state) {
+                all_terminal = false;
+                all_cancelled = false;
+                break;
+            }
+            if t.state == TaskState::Failed || t.state == TaskState::TimedOut {
+                any_failed = true;
+                all_cancelled = false;
+            } else if t.state != TaskState::Cancelled {
+                all_cancelled = false;
+            }
+        }
+    }
+
+    let next_state = if all_terminal && draining_ids.is_empty() {
+        if any_failed {
+            TaskGroupState::Failed
+        } else if all_cancelled {
+            TaskGroupState::Cancelled
+        } else {
+            TaskGroupState::Completed
+        }
+    } else if !draining_ids.is_empty() {
+        TaskGroupState::Draining
+    } else {
+        TaskGroupState::Active
+    };
+
+    if let Some(group_mut) = inner.groups.get_mut(group_id) {
+        group_mut.draining_task_ids = draining_ids;
+        group_mut.state = next_state;
+        if now_epoch_ms > 0 {
+            group_mut.updated_at_epoch_ms = now_epoch_ms;
+        }
+    }
+}
+
+fn task_record_to_info(record: &TaskRecord) -> crate::TaskInfo {
+    let (exit_code, duration_ms, error_message) = match &record.result {
+        Some(res) => (
+            res.exit_code,
+            res.execution_duration_ms,
+            res.error_message.clone(),
+        ),
+        None => (0, 0, String::new()),
+    };
+    crate::TaskInfo {
+        task_id: record.spec.task_id.clone(),
+        state: record.state as i32,
+        engine: record.spec.engine,
+        run_attempt: record.active_attempt,
+        assigned_node_id: record.assigned_node_id.clone().unwrap_or_default(),
+        timeout_seconds: record.spec.timeout_seconds,
+        requires_unmetered: record.spec.requires_unmetered,
+        exit_code,
+        execution_duration_ms: duration_ms,
+        error_message,
+        speculative_node_id: record.speculative_node_id.clone().unwrap_or_default(),
     }
 }
 
@@ -973,6 +1679,8 @@ mod tests {
             artifact_sha256: "dummy-sha256".to_string(),
             requires_unmetered,
             artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
         }
     }
 
@@ -1389,5 +2097,576 @@ mod tests {
             "Root shell task must be dispatched when allow_insecure_root_tasks is true on rooted node"
         );
         assert_eq!(sync_res.desired_tasks[0].task_id, "root_task_02");
+    }
+
+    fn make_group_template(sha: &str) -> TaskTemplate {
+        TaskTemplate {
+            engine: ExecutionEngine::WasmWasi as i32,
+            timeout_seconds: 120,
+            entrypoint: "_start".to_string(),
+            env_vars: HashMap::from([("MODE".to_string(), "prod".to_string())]),
+            artifact_sha256: sha.to_string(),
+            shell_command: String::new(),
+            requires_unmetered: false,
+        }
+    }
+
+    #[test]
+    fn test_task_group_submit_and_status_rollup() {
+        let scheduler = ClusterScheduler::new();
+        let wifi = scheduler
+            .register_node(
+                "wifi_g1".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let sub = scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "img-batch".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![
+                        TaskPartitionSpec {
+                            env_overrides: HashMap::from([("PART".to_string(), "0".to_string())]),
+                        },
+                        TaskPartitionSpec {
+                            env_overrides: HashMap::from([("PART".to_string(), "1".to_string())]),
+                        },
+                    ],
+                },
+                1000,
+            )
+            .unwrap();
+        assert_eq!(sub.group_epoch, 1);
+        assert_eq!(sub.total_tasks, 2);
+
+        let sync1 = scheduler
+            .sync_node_state("wifi_g1", &wifi.session_token, &[], 2000)
+            .unwrap();
+        assert_eq!(sync1.desired_tasks.len(), 1);
+        let t1 = sync1.desired_tasks[0].clone();
+
+        let sync2 = scheduler
+            .sync_node_state(
+                "wifi_g1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: t1.task_id,
+                    run_attempt: t1.run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 10,
+                }],
+                3000,
+            )
+            .unwrap();
+        let t2 = sync2.desired_tasks[0].clone();
+
+        scheduler
+            .sync_node_state(
+                "wifi_g1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: t2.task_id,
+                    run_attempt: t2.run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 12,
+                }],
+                4000,
+            )
+            .unwrap();
+
+        let status = scheduler.get_task_group_status("img-batch", true).unwrap();
+        assert_eq!(status.state, TaskGroupState::Completed as i32);
+        assert_eq!(status.completed_tasks, 2);
+        assert_eq!(status.tasks.len(), 2);
+    }
+
+    #[test]
+    fn test_task_group_replace_immediate_fences_cellular_and_queues_wifi_cancel() {
+        let scheduler = ClusterScheduler::new();
+        let wifi = scheduler
+            .register_node(
+                "wifi_g2".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "fence-grp".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default(), TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+
+        // Lease one partition on cellular and one on Wi-Fi
+        scheduler
+            .register_node(
+                "cell_g2".to_string(),
+                make_test_capabilities(false, true),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        let cell_claim = scheduler
+            .claim_cellular_task_nominal("cell_g2", 90, false, 10)
+            .unwrap();
+        let cell_task = cell_claim.task.unwrap();
+        let wifi_sync = scheduler
+            .sync_node_state("wifi_g2", &wifi.session_token, &[], 2000)
+            .unwrap();
+        let wifi_task = wifi_sync.desired_tasks[0].clone();
+
+        let rep = scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "fence-grp".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"b".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                3000,
+            )
+            .unwrap();
+        assert_eq!(rep.new_epoch, 2);
+        assert_eq!(rep.cancelled_tasks, 2);
+        assert_eq!(rep.created_tasks, 1);
+
+        // Cellular submission for epoch 1 MUST fail with GroupSuperseded
+        let err = scheduler
+            .submit_cellular_result(&crate::SubmitCellularResultRequest {
+                node_id: "cell_g2".to_string(),
+                task_id: cell_task.task_id,
+                run_attempt: cell_task.run_attempt,
+                exit_code: 0,
+                stdout_bytes: Vec::new(),
+                stderr_bytes: Vec::new(),
+                error_code: String::new(),
+                error_message: String::new(),
+                execution_duration_ms: 5,
+            })
+            .unwrap_err();
+        assert!(matches!(err, SchedulingError::GroupSuperseded { .. }));
+
+        // Wi-Fi sync receives cancel_task_ids once and acks stale completed report
+        let next_sync = scheduler
+            .sync_node_state(
+                "wifi_g2",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: wifi_task.task_id.clone(),
+                    run_attempt: wifi_task.run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: Vec::new(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 5,
+                }],
+                4000,
+            )
+            .unwrap();
+        assert_eq!(next_sync.cancel_task_ids, vec![wifi_task.task_id.clone()]);
+        assert!(next_sync.acknowledged_task_ids.contains(&wifi_task.task_id));
+
+        // Subsequent sync has drained cancel_task_ids
+        let drain_sync = scheduler
+            .sync_node_state("wifi_g2", &wifi.session_token, &[], 5000)
+            .unwrap();
+        assert!(drain_sync.cancel_task_ids.is_empty());
+    }
+
+    #[test]
+    fn test_task_group_replace_drain_and_cas_conflict() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "drain-grp".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default(), TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .register_node(
+                "cell_d1".to_string(),
+                make_test_capabilities(false, true),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        let cell_claim = scheduler
+            .claim_cellular_task_nominal("cell_d1", 90, false, 10)
+            .unwrap();
+        let leased_e1 = cell_claim.task.unwrap();
+
+        // CAS mismatch fails with GroupEpochConflict
+        let cas_err = scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "drain-grp".to_string(),
+                    expected_epoch: Some(99),
+                    template: Some(make_group_template(&"b".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Drain as i32,
+                },
+                2000,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            cas_err,
+            SchedulingError::GroupEpochConflict { .. }
+        ));
+
+        // DRAIN leaves leased epoch 1 task alive and cancels pending epoch 1 task
+        let rep = scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "drain-grp".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"b".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Drain as i32,
+                },
+                2000,
+            )
+            .unwrap();
+        assert_eq!(rep.state, TaskGroupState::Draining as i32);
+        assert_eq!(rep.draining_tasks, 1);
+        assert_eq!(rep.cancelled_tasks, 1);
+
+        // Draining epoch 1 task CAN still commit within its lease
+        let commit = scheduler
+            .submit_cellular_result(&crate::SubmitCellularResultRequest {
+                node_id: "cell_d1".to_string(),
+                task_id: leased_e1.task_id,
+                run_attempt: leased_e1.run_attempt,
+                exit_code: 0,
+                stdout_bytes: b"done".to_vec(),
+                stderr_bytes: Vec::new(),
+                error_code: String::new(),
+                error_message: String::new(),
+                execution_duration_ms: 5,
+            })
+            .unwrap();
+        assert!(commit.accepted);
+
+        // Once drained, group transitions from DRAINING -> ACTIVE
+        let st = scheduler.get_task_group_status("drain-grp", false).unwrap();
+        assert_eq!(st.state, TaskGroupState::Active as i32);
+        assert_eq!(st.previous_epoch_draining_tasks, 0);
+    }
+
+    #[test]
+    fn test_task_group_cancel_and_bounds_validation() {
+        let scheduler = ClusterScheduler::new();
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad:id".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidGroupId(_))
+        ));
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "valid-id".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidGroupPartitions(_))
+        ));
+
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "valid-id".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+        let cancel = scheduler
+            .cancel_task_group("valid-id", Some(1), 2000)
+            .unwrap();
+        assert!(cancel.cancelled);
+        assert_eq!(cancel.cancelled_tasks, 1);
+
+        let st = scheduler.get_task_group_status("valid-id", false).unwrap();
+        assert_eq!(st.state, TaskGroupState::Cancelled as i32);
+        assert_eq!(st.cancelled_tasks, 1);
+    }
+
+    #[test]
+    fn test_task_group_drain_stays_draining_until_epoch1_finishes() {
+        let scheduler = ClusterScheduler::new();
+        let wifi = scheduler
+            .register_node(
+                "wifi-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "drain-order".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+
+        let sync1 = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 1000)
+            .unwrap();
+        assert_eq!(sync1.desired_tasks[0].task_id, "drain-order:e1:p0");
+
+        let rep = scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "drain-order".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"b".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Drain as i32,
+                },
+                2000,
+            )
+            .unwrap();
+        assert_eq!(rep.state, TaskGroupState::Draining as i32);
+
+        // Wi-Fi worker claims and completes epoch 2 while epoch 1 is still LEASED.
+        let sync2 = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 2000)
+            .unwrap();
+        assert_eq!(sync2.desired_tasks[0].task_id, "drain-order:e2:p0");
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "drain-order:e2:p0".to_string(),
+                    run_attempt: sync2.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 10,
+                }],
+                3000,
+            )
+            .unwrap();
+
+        // Must remain Draining while epoch 1 task is still non-terminal.
+        let mid = scheduler
+            .get_task_group_status("drain-order", false)
+            .unwrap();
+        assert_eq!(mid.state, TaskGroupState::Draining as i32);
+        assert_eq!(mid.previous_epoch_draining_tasks, 1);
+
+        // Once epoch 1 finishes, group transitions to Completed.
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "drain-order:e1:p0".to_string(),
+                    run_attempt: sync1.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: b"ok".to_vec(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 10,
+                }],
+                4000,
+            )
+            .unwrap();
+        let done = scheduler
+            .get_task_group_status("drain-order", false)
+            .unwrap();
+        assert_eq!(done.state, TaskGroupState::Completed as i32);
+        assert_eq!(done.previous_epoch_draining_tasks, 0);
+    }
+
+    #[test]
+    fn test_task_group_validation_guards_and_error_parity() {
+        let scheduler = ClusterScheduler::new();
+
+        // Invalid TaskTemplate: engine=Unspecified, timeout=0, empty shell_command
+        let mut bad_engine = make_group_template(&"a".repeat(64));
+        bad_engine.engine = ExecutionEngine::Unspecified as i32;
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-tpl".to_string(),
+                    template: Some(bad_engine),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        let mut bad_timeout = make_group_template(&"a".repeat(64));
+        bad_timeout.timeout_seconds = 0;
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-to".to_string(),
+                    template: Some(bad_timeout),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "bad-shell".to_string(),
+                    template: Some(TaskTemplate {
+                        engine: ExecutionEngine::ToyboxUser as i32,
+                        timeout_seconds: 30,
+                        shell_command: "   ".to_string(),
+                        ..Default::default()
+                    }),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidTaskTemplate(_))
+        ));
+
+        // Standalone submit_task rejects reserved <group>:e<epoch>:p<index> IDs.
+        assert!(matches!(
+            scheduler.submit_task(TaskSpec {
+                task_id: "grp:e1:p0".to_string(),
+                engine: ExecutionEngine::WasmWasi as i32,
+                timeout_seconds: 30,
+                ..Default::default()
+            }),
+            Err(SchedulingError::TaskIdCollision(_))
+        ));
+
+        // Group-owned tasks reject individual cancel_task and return TaskCancelled on late cellular submit.
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "grp-guard".to_string(),
+                    template: Some(make_group_template(&"a".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+        assert!(matches!(
+            scheduler.cancel_task("grp-guard:e1:p0"),
+            Err(SchedulingError::InvalidStateTransition { .. })
+        ));
+
+        scheduler
+            .cancel_task_group("grp-guard", Some(1), 2000)
+            .unwrap();
+        assert!(matches!(
+            scheduler.submit_cellular_result(&crate::SubmitCellularResultRequest {
+                node_id: "cell-1".to_string(),
+                task_id: "grp-guard:e1:p0".to_string(),
+                run_attempt: 1,
+                exit_code: 0,
+                ..Default::default()
+            }),
+            Err(SchedulingError::TaskCancelled(_))
+        ));
+
+        let snap = scheduler.get_snapshot();
+        assert_eq!(snap.metrics.cancelled_tasks, 1);
+        assert_eq!(snap.tasks[0].state, "Cancelled");
+
+        // Replace on Completed group is rejected consistently with GroupTerminal.
+        let wifi = scheduler
+            .register_node(
+                "wifi-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "grp-done".to_string(),
+                    template: Some(make_group_template(&"c".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1000,
+            )
+            .unwrap();
+        let sync_done = scheduler
+            .sync_node_state("wifi-1", &wifi.session_token, &[], 1000)
+            .unwrap();
+        scheduler
+            .sync_node_state(
+                "wifi-1",
+                &wifi.session_token,
+                &[TaskExecutionReport {
+                    task_id: "grp-done:e1:p0".to_string(),
+                    run_attempt: sync_done.desired_tasks[0].run_attempt,
+                    state: TaskState::Completed as i32,
+                    exit_code: 0,
+                    stdout_bytes: Vec::new(),
+                    stderr_bytes: Vec::new(),
+                    error_code: String::new(),
+                    execution_time_ms: 5,
+                }],
+                2000,
+            )
+            .unwrap();
+        assert!(matches!(
+            scheduler.replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "grp-done".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(make_group_template(&"d".repeat(64))),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                3000,
+            ),
+            Err(SchedulingError::GroupTerminal(_))
+        ));
     }
 }

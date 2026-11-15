@@ -998,9 +998,9 @@ impl ClusterScheduler {
     ) -> Result<SubmitTaskGroupResponse, SchedulingError> {
         validate_group_id(&group.group_id)?;
         validate_partitions(&group.partitions)?;
-        let template = group
-            .template
-            .ok_or_else(|| SchedulingError::InvalidGroupPartitions("template is required".to_string()))?;
+        let template = group.template.ok_or_else(|| {
+            SchedulingError::InvalidGroupPartitions("template is required".to_string())
+        })?;
 
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
@@ -1056,9 +1056,9 @@ impl ClusterScheduler {
     ) -> Result<ReplaceTaskGroupResponse, SchedulingError> {
         validate_group_id(&req.group_id)?;
         validate_partitions(&req.partitions)?;
-        let template = req
-            .template
-            .ok_or_else(|| SchedulingError::InvalidGroupPartitions("template is required".to_string()))?;
+        let template = req.template.ok_or_else(|| {
+            SchedulingError::InvalidGroupPartitions("template is required".to_string())
+        })?;
 
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
@@ -1093,7 +1093,8 @@ impl ClusterScheduler {
             }
         }
 
-        let strategy = ReplaceStrategy::try_from(req.strategy).unwrap_or(ReplaceStrategy::Immediate);
+        let strategy =
+            ReplaceStrategy::try_from(req.strategy).unwrap_or(ReplaceStrategy::Immediate);
         let is_drain = strategy == ReplaceStrategy::Drain;
         let new_epoch = current_epoch + 1;
 
@@ -1503,7 +1504,11 @@ fn reconcile_group_state(inner: &mut SchedulerInner, group_id: &str, now_epoch_m
 
 fn task_record_to_info(record: &TaskRecord) -> crate::TaskInfo {
     let (exit_code, duration_ms, error_message) = match &record.result {
-        Some(res) => (res.exit_code, res.execution_duration_ms, res.error_message.clone()),
+        Some(res) => (
+            res.exit_code,
+            res.execution_duration_ms,
+            res.error_message.clone(),
+        ),
         None => (0, 0, String::new()),
     };
     crate::TaskInfo {
@@ -2222,7 +2227,10 @@ mod tests {
                 2000,
             )
             .unwrap_err();
-        assert!(matches!(cas_err, SchedulingError::GroupEpochConflict { .. }));
+        assert!(matches!(
+            cas_err,
+            SchedulingError::GroupEpochConflict { .. }
+        ));
 
         // DRAIN leaves leased epoch 1 task alive and cancels pending epoch 1 task
         let rep = scheduler
@@ -2299,7 +2307,9 @@ mod tests {
                 1000,
             )
             .unwrap();
-        let cancel = scheduler.cancel_task_group("valid-id", Some(1), 2000).unwrap();
+        let cancel = scheduler
+            .cancel_task_group("valid-id", Some(1), 2000)
+            .unwrap();
         assert!(cancel.cancelled);
         assert_eq!(cancel.cancelled_tasks, 1);
 

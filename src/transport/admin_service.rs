@@ -406,13 +406,12 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<SubmitTaskGroupResponse>, Status> {
         Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
-        let group = req
-            .group
-            .ok_or_else(|| Status::invalid_argument("group field is required in SubmitTaskGroupRequest"))?;
-        let template = group
-            .template
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("template field is required in TaskGroupSpec"))?;
+        let group = req.group.ok_or_else(|| {
+            Status::invalid_argument("group field is required in SubmitTaskGroupRequest")
+        })?;
+        let template = group.template.as_ref().ok_or_else(|| {
+            Status::invalid_argument("template field is required in TaskGroupSpec")
+        })?;
 
         self.validate_wasm_artifact(template.engine, &[], &template.artifact_sha256)?;
 
@@ -431,10 +430,9 @@ impl AdminService for AdminServiceImpl {
     ) -> Result<Response<ReplaceTaskGroupResponse>, Status> {
         Self::authorize_admin_peer(&request)?;
         let req = request.into_inner();
-        let template = req
-            .template
-            .as_ref()
-            .ok_or_else(|| Status::invalid_argument("template field is required in ReplaceTaskGroupRequest"))?;
+        let template = req.template.as_ref().ok_or_else(|| {
+            Status::invalid_argument("template field is required in ReplaceTaskGroupRequest")
+        })?;
 
         self.validate_wasm_artifact(template.engine, &[], &template.artifact_sha256)?;
 
@@ -867,7 +865,9 @@ mod tests {
 
         let scheduler = Arc::new(ClusterScheduler::new());
         let artifact_store = Arc::new(ArtifactStore::new());
-        let sha = artifact_store.store_artifact(b"\x00asm\x01\x00\x00\x00").unwrap();
+        let sha = artifact_store
+            .store_artifact(b"\x00asm\x01\x00\x00\x00")
+            .unwrap();
         let svc = AdminServiceImpl::with_artifact_store(
             scheduler,
             artifact_store,

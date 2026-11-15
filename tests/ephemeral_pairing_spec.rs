@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Integration Specification: Ephemeral Device Pairing & QR-Code Enrollment Engine
 //!
 //! Validates time-bounded single-use token lifecycle, CSR validation, Root CA signing,

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Executable Acceptance Criteria (BDD / Gherkin) Verification Suite
 //!
 //! Directly validates all three normative acceptance scenarios defined in

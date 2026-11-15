@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Technical Feasibility Spike: Cross-Platform Wire Serialization Parity
 //!
 //! Verifies binary Protobuf encoding, decoding, field integrity, and frame sizing boundaries.

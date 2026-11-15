@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! End-to-End Integration Specification: Operator Management and Cluster Observability
 //!
 //! Spawns an in-memory loopback orchestrator hosting both AndroGridService and AdminService

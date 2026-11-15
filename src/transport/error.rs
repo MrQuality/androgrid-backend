@@ -93,6 +93,50 @@ impl From<SchedulingError> for Status {
             SchedulingError::RootShellExecutionDisabled => Status::permission_denied(
                 "ROOT_SHELL_DISABLED: root shell execution is disabled; start orchestrator with --allow-insecure-root-tasks to enable",
             ),
+
+            SchedulingError::GroupNotFound(group_id) => {
+                Status::not_found(format!("GROUP_NOT_FOUND: TaskGroup '{}' does not exist", group_id))
+            }
+
+            SchedulingError::GroupAlreadyExists(group_id) => Status::already_exists(format!(
+                "GROUP_ALREADY_EXISTS: TaskGroup '{}' already exists",
+                group_id
+            )),
+
+            SchedulingError::GroupTerminal(group_id) => Status::failed_precondition(format!(
+                "GROUP_TERMINAL: TaskGroup '{}' is already in a terminal state",
+                group_id
+            )),
+
+            // Traces to: [INV-004], [NFR-REL-001]
+            SchedulingError::GroupEpochConflict {
+                group_id,
+                expected,
+                actual,
+            } => Status::aborted(format!(
+                "GROUP_EPOCH_CONFLICT: TaskGroup '{}' expected epoch {}, actual {}",
+                group_id, expected, actual
+            )),
+
+            // Traces to: [INV-004], [NFR-REL-001]
+            SchedulingError::GroupSuperseded {
+                task_id,
+                group_id,
+                task_epoch,
+                active_epoch,
+            } => Status::failed_precondition(format!(
+                "GROUP_SUPERSEDED: task '{}' from TaskGroup '{}' epoch {} superseded by epoch {}",
+                task_id, group_id, task_epoch, active_epoch
+            )),
+
+            SchedulingError::InvalidGroupId(group_id) => Status::invalid_argument(format!(
+                "INVALID_GROUP_ID: '{}' must match ^[a-zA-Z0-9_-]{{1,64}}$",
+                group_id
+            )),
+
+            SchedulingError::InvalidGroupPartitions(msg) => {
+                Status::invalid_argument(format!("INVALID_GROUP_PARTITIONS: {}", msg))
+            }
         }
     }
 }

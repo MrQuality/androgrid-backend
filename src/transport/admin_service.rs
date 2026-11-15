@@ -14,10 +14,13 @@ use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
 use crate::transport::tls::AuthenticatedPeer;
 use crate::{
-    CancelTaskRequest, CancelTaskResponse, GeneratePairingTokenRequest,
-    GeneratePairingTokenResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTasksRequest,
-    ListTasksResponse, ListWorkerNodesRequest, ListWorkerNodesResponse, SubmitTaskRequest,
-    SubmitTaskResponse, TaskState, UploadArtifactRequest, UploadArtifactResponse,
+    CancelTaskGroupRequest, CancelTaskGroupResponse, CancelTaskRequest, CancelTaskResponse,
+    GeneratePairingTokenRequest, GeneratePairingTokenResponse, GetTaskGroupStatusRequest,
+    GetTaskGroupStatusResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTaskGroupsRequest,
+    ListTaskGroupsResponse, ListTasksRequest, ListTasksResponse, ListWorkerNodesRequest,
+    ListWorkerNodesResponse, ReplaceTaskGroupRequest, ReplaceTaskGroupResponse,
+    SubmitTaskGroupRequest, SubmitTaskGroupResponse, SubmitTaskRequest, SubmitTaskResponse,
+    TaskGroupState, TaskState, UploadArtifactRequest, UploadArtifactResponse,
 };
 
 /// Production implementation of AdminService backed by atomic ClusterScheduler.
@@ -95,6 +98,36 @@ impl AdminServiceImpl {
         }
         Ok(())
     }
+
+    /// Validates WASM artifact references against ArtifactStore when inline bytecode is empty.
+    fn validate_wasm_artifact(
+        &self,
+        engine: i32,
+        wasm_bytecode: &[u8],
+        artifact_sha256: &str,
+    ) -> Result<(), Status> {
+        if engine == crate::ExecutionEngine::WasmWasi as i32 && wasm_bytecode.is_empty() {
+            let clean_sha = artifact_sha256.trim().to_ascii_lowercase();
+            if clean_sha.len() != 64 || !clean_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(Status::invalid_argument(
+                    "WASM task with empty wasm_bytecode requires a valid 64-char artifact_sha256",
+                ));
+            }
+            if self.artifact_store.get_artifact(&clean_sha).is_none() {
+                return Err(Status::failed_precondition(format!(
+                    "Artifact '{clean_sha}' is not present in orchestrator ArtifactStore; upload it via UploadArtifact first"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn current_epoch_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
 }
 
 #[tonic::async_trait]
@@ -118,20 +151,13 @@ impl AdminService for AdminServiceImpl {
                 "task_id must not be empty in TaskSpec",
             ));
         }
-
-        if task.engine == crate::ExecutionEngine::WasmWasi as i32 && task.wasm_bytecode.is_empty() {
-            let clean_sha = task.artifact_sha256.trim().to_ascii_lowercase();
-            if clean_sha.len() != 64 || !clean_sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-                return Err(Status::invalid_argument(
-                    "WASM task with empty wasm_bytecode requires a valid 64-char artifact_sha256",
-                ));
-            }
-            if self.artifact_store.get_artifact(&clean_sha).is_none() {
-                return Err(Status::failed_precondition(format!(
-                    "Artifact '{clean_sha}' is not present in orchestrator ArtifactStore; upload it via UploadArtifact first"
-                )));
-            }
+        if !task.group_id.is_empty() || task.group_epoch != 0 {
+            return Err(Status::invalid_argument(
+                "Standalone SubmitTask cannot specify group_id or group_epoch; use SubmitTaskGroup",
+            ));
         }
+
+        self.validate_wasm_artifact(task.engine, &task.wasm_bytecode, &task.artifact_sha256)?;
 
         match self.scheduler.submit_task(task) {
             Ok(()) => Ok(Response::new(SubmitTaskResponse {
@@ -370,6 +396,109 @@ impl AdminService for AdminServiceImpl {
             pairing_payload_json: payload_json,
         }))
     }
+
+    /// Enqueues a partitioned TaskGroup workload backed by content-addressed artifacts.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004], [INV-006], [NFR-PERF-001]
+    async fn submit_task_group(
+        &self,
+        request: Request<SubmitTaskGroupRequest>,
+    ) -> Result<Response<SubmitTaskGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let group = req
+            .group
+            .ok_or_else(|| Status::invalid_argument("group field is required in SubmitTaskGroupRequest"))?;
+        let template = group
+            .template
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("template field is required in TaskGroupSpec"))?;
+
+        self.validate_wasm_artifact(template.engine, &[], &template.artifact_sha256)?;
+
+        self.scheduler
+            .submit_task_group(group, Self::current_epoch_ms())
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    /// Atomically replaces a TaskGroup workload with a new epoch.
+    ///
+    /// Traces to: [INV-004], [NFR-REL-001], [NFR-PERF-001]
+    async fn replace_task_group(
+        &self,
+        request: Request<ReplaceTaskGroupRequest>,
+    ) -> Result<Response<ReplaceTaskGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let template = req
+            .template
+            .as_ref()
+            .ok_or_else(|| Status::invalid_argument("template field is required in ReplaceTaskGroupRequest"))?;
+
+        self.validate_wasm_artifact(template.engine, &[], &template.artifact_sha256)?;
+
+        self.scheduler
+            .replace_task_group(req, Self::current_epoch_ms())
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    /// Cancels an active or draining TaskGroup.
+    ///
+    /// Traces to: [REQ-OP-004], [INV-004]
+    async fn cancel_task_group(
+        &self,
+        request: Request<CancelTaskGroupRequest>,
+    ) -> Result<Response<CancelTaskGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        if req.group_id.is_empty() {
+            return Err(Status::invalid_argument("group_id must not be empty"));
+        }
+
+        self.scheduler
+            .cancel_task_group(&req.group_id, req.expected_epoch, Self::current_epoch_ms())
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    /// Retrieves aggregate status and optional per-partition details for a TaskGroup.
+    ///
+    /// Traces to: [REQ-OP-004], [NFR-PERF-001]
+    async fn get_task_group_status(
+        &self,
+        request: Request<GetTaskGroupStatusRequest>,
+    ) -> Result<Response<GetTaskGroupStatusResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        if req.group_id.is_empty() {
+            return Err(Status::invalid_argument("group_id must not be empty"));
+        }
+
+        self.scheduler
+            .get_task_group_status(&req.group_id, req.include_tasks)
+            .map(Response::new)
+            .map_err(Status::from)
+    }
+
+    /// Lists all registered TaskGroups.
+    ///
+    /// Traces to: [REQ-OP-004]
+    async fn list_task_groups(
+        &self,
+        request: Request<ListTaskGroupsRequest>,
+    ) -> Result<Response<ListTaskGroupsResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let state_filter = if req.state_filter == 0 {
+            None
+        } else {
+            TaskGroupState::try_from(req.state_filter).ok()
+        };
+        let groups = self.scheduler.list_task_groups(state_filter);
+        Ok(Response::new(ListTaskGroupsResponse { groups }))
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +520,8 @@ mod tests {
             artifact_sha256: "test_sha256".to_string(),
             requires_unmetered: false,
             artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
         }
     }
 
@@ -713,5 +844,90 @@ mod tests {
             .await
             .expect_err("16 MB raw upload would overflow FetchArtifactResponse envelope");
         assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+    }
+
+    #[tokio::test]
+    async fn test_submit_task_rejects_caller_group_spoofing() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let svc = AdminServiceImpl::new(scheduler);
+        let mut spec = make_test_task("spoof-task");
+        spec.group_id = "fake-group".to_string();
+        spec.group_epoch = 1;
+
+        let err = svc
+            .submit_task(Request::new(SubmitTaskRequest { task: Some(spec) }))
+            .await
+            .expect_err("Standalone SubmitTask must reject caller-supplied group_id/group_epoch");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn test_admin_task_group_round_trip_and_authz_guard() {
+        use crate::{ReplaceStrategy, TaskGroupSpec, TaskPartitionSpec, TaskTemplate};
+
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let artifact_store = Arc::new(ArtifactStore::new());
+        let sha = artifact_store.store_artifact(b"\x00asm\x01\x00\x00\x00").unwrap();
+        let svc = AdminServiceImpl::with_artifact_store(
+            scheduler,
+            artifact_store,
+            "http://127.0.0.1:50052".to_string(),
+        );
+
+        let mut worker_req = Request::new(ListTaskGroupsRequest { state_filter: 0 });
+        worker_req.extensions_mut().insert(AuthenticatedPeer {
+            common_name: Some("worker-01".to_string()),
+            organizational_unit: Some("Worker".to_string()),
+        });
+        let authz_err = svc
+            .list_task_groups(worker_req)
+            .await
+            .expect_err("Worker OU must be denied on AdminService TaskGroup RPCs");
+        assert_eq!(authz_err.code(), tonic::Code::PermissionDenied);
+
+        let mut admin_req = Request::new(SubmitTaskGroupRequest {
+            group: Some(TaskGroupSpec {
+                group_id: "adm-grp".to_string(),
+                template: Some(TaskTemplate {
+                    engine: crate::ExecutionEngine::WasmWasi as i32,
+                    timeout_seconds: 60,
+                    entrypoint: "_start".to_string(),
+                    env_vars: std::collections::HashMap::new(),
+                    artifact_sha256: sha.clone(),
+                    shell_command: String::new(),
+                    requires_unmetered: false,
+                }),
+                partitions: vec![TaskPartitionSpec::default()],
+            }),
+        });
+        admin_req.extensions_mut().insert(AuthenticatedPeer {
+            common_name: Some("ops".to_string()),
+            organizational_unit: Some("Control Plane".to_string()),
+        });
+        let sub_res = svc.submit_task_group(admin_req).await.unwrap().into_inner();
+        assert!(sub_res.accepted);
+        assert_eq!(sub_res.group_epoch, 1);
+
+        let rep_res = svc
+            .replace_task_group(Request::new(ReplaceTaskGroupRequest {
+                group_id: "adm-grp".to_string(),
+                expected_epoch: Some(1),
+                template: Some(TaskTemplate {
+                    engine: crate::ExecutionEngine::WasmWasi as i32,
+                    timeout_seconds: 60,
+                    entrypoint: "_start".to_string(),
+                    env_vars: std::collections::HashMap::new(),
+                    artifact_sha256: sha,
+                    shell_command: String::new(),
+                    requires_unmetered: false,
+                }),
+                partitions: vec![TaskPartitionSpec::default(), TaskPartitionSpec::default()],
+                strategy: ReplaceStrategy::Immediate as i32,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(rep_res.new_epoch, 2);
+        assert_eq!(rep_res.created_tasks, 2);
     }
 }

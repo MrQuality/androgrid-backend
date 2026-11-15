@@ -233,7 +233,7 @@ enum GroupCommands {
         group_id: String,
 
         /// Number of partitions to enqueue (1..=1000)
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
         partitions: u32,
 
         /// Path to compiled WebAssembly/WASI module
@@ -280,7 +280,7 @@ enum GroupCommands {
         strategy: String,
 
         /// Number of partitions in the new epoch (1..=1000)
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=1000))]
         partitions: u32,
 
         /// Path to compiled WebAssembly/WASI module
@@ -1450,6 +1450,98 @@ fn build_partitions(count: u32) -> Vec<TaskPartitionSpec> {
         .collect()
 }
 
+fn parse_group_state_filter(state: Option<&str>) -> Result<i32, String> {
+    match state.map(str::to_ascii_lowercase).as_deref() {
+        None => Ok(TaskGroupState::Unspecified as i32),
+        Some("active") => Ok(TaskGroupState::Active as i32),
+        Some("draining") => Ok(TaskGroupState::Draining as i32),
+        Some("completed") => Ok(TaskGroupState::Completed as i32),
+        Some("failed") => Ok(TaskGroupState::Failed as i32),
+        Some("cancelled") => Ok(TaskGroupState::Cancelled as i32),
+        Some(other) => Err(format!(
+            "Invalid --state '{}'; expected one of: active, draining, completed, failed, cancelled",
+            other
+        )),
+    }
+}
+
+fn format_group_status_output(
+    res: &androgrid_backend::GetTaskGroupStatusResponse,
+    include_tasks: bool,
+    format: &str,
+) -> String {
+    if format == "json" {
+        let mut obj = serde_json::json!({
+            "group_id": res.group_id,
+            "current_epoch": res.current_epoch,
+            "state": task_group_state_to_string(res.state),
+            "total_tasks": res.total_tasks,
+            "pending_tasks": res.pending_tasks,
+            "leased_tasks": res.leased_tasks,
+            "running_tasks": res.running_tasks,
+            "completed_tasks": res.completed_tasks,
+            "failed_tasks": res.failed_tasks,
+            "timed_out_tasks": res.timed_out_tasks,
+            "cancelled_tasks": res.cancelled_tasks,
+            "preempted_tasks": res.preempted_tasks,
+            "previous_epoch_draining_tasks": res.previous_epoch_draining_tasks,
+        });
+        if include_tasks {
+            let tasks: Vec<_> = res
+                .tasks
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "task_id": t.task_id,
+                        "state": task_state_to_string(t.state),
+                        "run_attempt": t.run_attempt,
+                        "assigned_node_id": t.assigned_node_id,
+                        "exit_code": t.exit_code,
+                        "execution_duration_ms": t.execution_duration_ms,
+                        "error_message": t.error_message,
+                    })
+                })
+                .collect();
+            obj["tasks"] = serde_json::Value::Array(tasks);
+        }
+        return obj.to_string();
+    }
+
+    let mut out = format!(
+        "TaskGroup {} [epoch={}, state={}]: total={}, pending={}, leased={}, running={}, completed={}, failed={}, timed_out={}, cancelled={}, preempted={}, draining_prev={}",
+        res.group_id,
+        res.current_epoch,
+        task_group_state_to_string(res.state),
+        res.total_tasks,
+        res.pending_tasks,
+        res.leased_tasks,
+        res.running_tasks,
+        res.completed_tasks,
+        res.failed_tasks,
+        res.timed_out_tasks,
+        res.cancelled_tasks,
+        res.preempted_tasks,
+        res.previous_epoch_draining_tasks
+    );
+    if include_tasks {
+        for t in &res.tasks {
+            out.push_str(&format!(
+                "\n  - {} [{}] attempt={} node={} exit_code={}",
+                t.task_id,
+                task_state_to_string(t.state),
+                t.run_attempt,
+                if t.assigned_node_id.is_empty() {
+                    "-"
+                } else {
+                    t.assigned_node_id.as_str()
+                },
+                t.exit_code
+            ));
+        }
+    }
+    out
+}
+
 async fn handle_group_command(
     client: &mut AdminServiceClient<tonic::transport::Channel>,
     action: GroupCommands,
@@ -1619,50 +1711,14 @@ async fn handle_group_command(
                 })
                 .await?
                 .into_inner();
-            if format == "json" {
-                println!(
-                    "{}",
-                    serde_json::json!({
-                        "group_id": res.group_id,
-                        "current_epoch": res.current_epoch,
-                        "state": task_group_state_to_string(res.state),
-                        "total_tasks": res.total_tasks,
-                        "pending_tasks": res.pending_tasks,
-                        "leased_tasks": res.leased_tasks,
-                        "running_tasks": res.running_tasks,
-                        "completed_tasks": res.completed_tasks,
-                        "failed_tasks": res.failed_tasks,
-                        "timed_out_tasks": res.timed_out_tasks,
-                        "cancelled_tasks": res.cancelled_tasks,
-                        "preempted_tasks": res.preempted_tasks,
-                        "previous_epoch_draining_tasks": res.previous_epoch_draining_tasks,
-                    })
-                );
-            } else {
-                println!(
-                    "TaskGroup {} [epoch={}, state={}]: total={}, pending={}, leased={}, completed={}, failed={}, cancelled={}, draining_prev={}",
-                    res.group_id,
-                    res.current_epoch,
-                    task_group_state_to_string(res.state),
-                    res.total_tasks,
-                    res.pending_tasks,
-                    res.leased_tasks,
-                    res.completed_tasks,
-                    res.failed_tasks,
-                    res.cancelled_tasks,
-                    res.previous_epoch_draining_tasks
-                );
-            }
+            println!(
+                "{}",
+                format_group_status_output(&res, include_tasks, format)
+            );
         }
         GroupCommands::List { state } => {
-            let state_filter = match state.as_deref().map(str::to_ascii_lowercase).as_deref() {
-                Some("active") => TaskGroupState::Active as i32,
-                Some("draining") => TaskGroupState::Draining as i32,
-                Some("completed") => TaskGroupState::Completed as i32,
-                Some("failed") => TaskGroupState::Failed as i32,
-                Some("cancelled") => TaskGroupState::Cancelled as i32,
-                _ => TaskGroupState::Unspecified as i32,
-            };
+            let state_filter = parse_group_state_filter(state.as_deref())
+                .map_err(|msg| std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))?;
             let res = client
                 .list_task_groups(ListTaskGroupsRequest { state_filter })
                 .await?

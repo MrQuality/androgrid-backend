@@ -1,4 +1,4 @@
-# Hardware Alpha Testing & Verification Guide (v0.0.1-alpha.2)
+# Hardware Alpha Testing & Verification Guide (v0.0.1-alpha.4)
 
 Welcome to the **AndroGrid Hardware Alpha Testing** guide. This manual provides an end-to-end testing procedure for early hardware testers running on physical Android devices.
 
@@ -8,7 +8,7 @@ Traceability: `[REQ-OP-001]`, `[REQ-OP-002]`, `[REQ-OP-003]`, `[REQ-VER-001]`, `
 
 ## 1. Overview & Testing Philosophy
 
-The `v0.0.1-alpha.2` release is designed for real-world dogfooding on physical smartphones and tablets across heterogeneous silicon, Android OS versions, and thermal conditions.
+The `v0.0.1-alpha.4` release is designed for real-world dogfooding on physical smartphones and tablets across heterogeneous silicon, Android OS versions, and thermal conditions.
 
 As an alpha tester, **you do not need to clone repositories, compile code, or open Pull Requests.** Your role is strictly to:
 1. Download pre-compiled release binaries and APKs.
@@ -17,23 +17,23 @@ As an alpha tester, **you do not need to clone repositories, compile code, or op
 
 ---
 
-## 2. Download Release Assets (v0.0.1-alpha.2)
+## 2. Download Release Assets (v0.0.1-alpha.4)
 
 All immutable binary packages, mobile application bundles, and pre-compiled WASM workloads are hosted directly as release assets on GitHub:
 
-* **GitHub Release Page:** [AndroGrid v0.0.1-alpha.2 Release Assets](https://github.com/MrQuality/androgrid-backend/releases/tag/v0.0.1-alpha.2)
+* **GitHub Release Page:** [AndroGrid v0.0.1-alpha.4 Release Assets](https://github.com/MrQuality/androgrid-backend/releases/tag/v0.0.1-alpha.4)
 
 ### Asset Download Directory
 
 | Component | Target Platform | Release Asset Link |
 | :--- | :--- | :--- |
-| **Android Worker APK** | Android 9+ (API 28 to 37) | [`androgrid-worker-v0.0.1-alpha.2.apk`](https://github.com/MrQuality/androgrid-android/releases/download/v0.0.1-alpha.2/androgrid-worker-v0.0.1-alpha.2.apk) |
-| **CLI & Orchestrator** | Linux (x86_64) | [`androgrid-v0.0.1-alpha.2-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/androgrid-v0.0.1-alpha.2-x86_64-unknown-linux-gnu.tar.gz) |
-| **CLI & Orchestrator** | Linux (ARM64 / aarch64) | [`androgrid-v0.0.1-alpha.2-aarch64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/androgrid-v0.0.1-alpha.2-aarch64-unknown-linux-gnu.tar.gz) |
-| **CLI & Orchestrator** | Windows (x86_64) | [`androgrid-v0.0.1-alpha.2-x86_64-pc-windows-msvc.zip`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/androgrid-v0.0.1-alpha.2-x86_64-pc-windows-msvc.zip) |
-| **CLI & Orchestrator** | macOS (Apple Silicon / ARM64) | [`androgrid-v0.0.1-alpha.2-aarch64-apple-darwin.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/androgrid-v0.0.1-alpha.2-aarch64-apple-darwin.tar.gz) |
-| **Sample WASI Workload** | Universal WASM (`wasm32-wasip1`) | [`image-processor.wasm`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/image-processor.wasm) |
-| **Verification Ledger** | SHA-256 Checksums | [`SHA256SUMS.txt`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.2/SHA256SUMS.txt) |
+| **Android Worker APK** | Android 9+ (API 28 to 37) | [`androgrid-worker-v0.0.1-alpha.4.apk`](https://github.com/MrQuality/androgrid-android/releases/download/v0.0.1-alpha.4/androgrid-worker-v0.0.1-alpha.4.apk) |
+| **CLI & Orchestrator** | Linux (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz) |
+| **CLI & Orchestrator** | Linux (ARM64 / aarch64) | [`androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-unknown-linux-gnu.tar.gz) |
+| **CLI & Orchestrator** | Windows (x86_64) | [`androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-x86_64-pc-windows-msvc.zip) |
+| **CLI & Orchestrator** | macOS (Apple Silicon / ARM64) | [`androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/androgrid-v0.0.1-alpha.4-aarch64-apple-darwin.tar.gz) |
+| **Sample WASI Workload** | Universal WASM (`wasm32-wasip1`) | [`image-processor.wasm`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/image-processor.wasm) |
+| **Verification Ledger** | SHA-256 Checksums | [`SHA256SUMS.txt`](https://github.com/MrQuality/androgrid-backend/releases/download/v0.0.1-alpha.4/SHA256SUMS.txt) |
 
 ### Integrity Verification
 
@@ -44,7 +44,7 @@ Before running downloaded binaries, verify their SHA-256 digests against the pub
 sha256sum -c SHA256SUMS.txt
 
 # On Windows PowerShell:
-Get-FileHash -Algorithm SHA256 androgrid-worker-v0.0.1-alpha.2.apk
+Get-FileHash -Algorithm SHA256 androgrid-worker-v0.0.1-alpha.4.apk
 ```
 
 ---
@@ -67,11 +67,11 @@ Verify your test device meets the following minimum specifications:
 Follow this 5-step test sequence to verify cluster execution on your hardware.
 
 ### Step 1: Install the Android Worker Application
-1. Download `androgrid-worker-v0.0.1-alpha.2.apk` onto your physical phone or tablet (via mobile browser or USB transfer).
+1. Download `androgrid-worker-v0.0.1-alpha.4.apk` onto your physical phone or tablet (via mobile browser or USB transfer).
 2. Tap the downloaded APK to install it. If prompted, allow installations from unknown sources for your browser or file manager.
 3. Alternatively, install via ADB from your host workstation:
    ```bash
-   adb install -r -g androgrid-worker-v0.0.1-alpha.2.apk
+   adb install -r -g androgrid-worker-v0.0.1-alpha.4.apk
    ```
 4. Launch **AndroGrid Worker** from your launcher.
 5. When prompted, grant **Notification** permissions (required for typed Foreground Service monitoring under Android 13+) and **Camera** permissions (for QR code pairing).
@@ -99,7 +99,7 @@ On your workstation, unpack the native CLI archive and initiate pairing mode:
 
 ```bash
 # Unpack the downloaded archive (Linux / macOS example):
-tar -xzf androgrid-v0.0.1-alpha.2-x86_64-unknown-linux-gnu.tar.gz
+tar -xzf androgrid-v0.0.1-alpha.4-x86_64-unknown-linux-gnu.tar.gz
 
 # Start pairing session and print ASCII QR code in your terminal:
 # For local USB testing over ADB reverse tunnel:
@@ -208,11 +208,11 @@ When filing an issue, please copy, paste, and complete the following markdown te
 - Total System RAM: (e.g., 8 GB)
 - Network Connection: (e.g., Home Wi-Fi 6 / USB ADB Reverse / 5G Mobile Data)
 - Battery Temperature during test: (e.g., 31.0°C)
-- Release Version: v0.0.1-alpha.2
+- Release Version: v0.0.1-alpha.4
 
 ### Test Steps Executed
-1. Installed APK version v0.0.1-alpha.2 via ADB.
-2. Configured ADB reverse tunnels (50051 and 50052).
+1. Installed APK version v0.0.1-alpha.4 via ADB.
+2. Configured ADB reverse tunnel (tcp:50051).
 3. Scanned CLI pairing QR code.
 4. Dispatched image-processor.wasm.
 

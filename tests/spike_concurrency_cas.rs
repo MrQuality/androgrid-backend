@@ -58,6 +58,8 @@ async fn spike_concurrent_result_submissions_zero_double_commit() {
         artifact_sha256: "sha256-abc".to_string(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -167,6 +169,8 @@ async fn spike_speculative_preemption_concurrent_race() {
         artifact_sha256: "sha256-xyz".to_string(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -255,4 +259,84 @@ async fn spike_speculative_preemption_concurrent_race() {
     let result = scheduler.get_task_result(&task_id).unwrap();
     assert_eq!(result.committed_attempt, 2);
     assert_eq!(result.committed_by_node_id, "wifi-node");
+}
+
+/// Validates that concurrent ReplaceTaskGroup calls with expected_epoch=1 allow
+/// exactly one CAS winner and reject all others with GroupEpochConflict.
+///
+/// Traces to: [INV-004], [NFR-REL-001]
+#[tokio::test]
+async fn test_concurrent_replace_task_group_cas_race() {
+    use androgrid_backend::{
+        ReplaceStrategy, ReplaceTaskGroupRequest, TaskGroupSpec, TaskPartitionSpec, TaskTemplate,
+    };
+    use std::collections::HashMap;
+    use tokio::sync::Barrier;
+
+    let scheduler = Arc::new(ClusterScheduler::new());
+    let template = TaskTemplate {
+        engine: ExecutionEngine::WasmWasi as i32,
+        timeout_seconds: 60,
+        entrypoint: "_start".to_string(),
+        env_vars: HashMap::new(),
+        artifact_sha256: "a".repeat(64),
+        shell_command: String::new(),
+        requires_unmetered: false,
+    };
+
+    scheduler
+        .submit_task_group(
+            TaskGroupSpec {
+                group_id: "cas-grp".to_string(),
+                template: Some(template.clone()),
+                partitions: vec![TaskPartitionSpec::default(); 4],
+            },
+            1000,
+        )
+        .unwrap();
+
+    let n = 8;
+    let barrier = Arc::new(Barrier::new(n));
+    let mut handles = Vec::with_capacity(n);
+
+    for i in 0..n {
+        let sched = Arc::clone(&scheduler);
+        let b = Arc::clone(&barrier);
+        let tpl = template.clone();
+        handles.push(tokio::spawn(async move {
+            b.wait().await;
+            sched.replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "cas-grp".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(tpl),
+                    partitions: vec![TaskPartitionSpec::default(); 2],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                2000 + i as u64,
+            )
+        }));
+    }
+
+    let mut ok_count = 0;
+    let mut conflict_count = 0;
+    for h in handles {
+        match h.await.unwrap() {
+            Ok(res) => {
+                assert_eq!(res.new_epoch, 2);
+                ok_count += 1;
+            }
+            Err(androgrid_backend::SchedulingError::GroupEpochConflict {
+                expected: 1,
+                actual: 2,
+                ..
+            }) => {
+                conflict_count += 1;
+            }
+            Err(other) => panic!("Unexpected error in ReplaceTaskGroup CAS race: {:?}", other),
+        }
+    }
+
+    assert_eq!(ok_count, 1, "Exactly one ReplaceTaskGroup must win CAS");
+    assert_eq!(conflict_count, n - 1);
 }

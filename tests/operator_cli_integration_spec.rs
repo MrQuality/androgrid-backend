@@ -169,6 +169,8 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         artifact_sha256: "b45a...".to_string(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
 
     let submit_res = admin_client
@@ -299,6 +301,8 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         artifact_sha256: "c12d...".to_string(),
         requires_unmetered: false,
         artifact_url: String::new(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
 
     admin_client
@@ -463,6 +467,8 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
             artifact_sha256: computed_sha,
             requires_unmetered: false,
             artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
         };
 
         // Submit task via AdminService

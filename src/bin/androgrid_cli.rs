@@ -1380,8 +1380,7 @@ fn print_cert_summary(
     Ok(())
 }
 
-async fn resolve_group_template(
-    client: &mut AdminServiceClient<tonic::transport::Channel>,
+struct GroupTemplateArgs {
     wasm: Option<PathBuf>,
     entrypoint: String,
     shell: Option<String>,
@@ -1389,7 +1388,21 @@ async fn resolve_group_template(
     timeout: u32,
     requires_unmetered: bool,
     env: Vec<(String, String)>,
+}
+
+async fn resolve_group_template(
+    client: &mut AdminServiceClient<tonic::transport::Channel>,
+    args: GroupTemplateArgs,
 ) -> Result<TaskTemplate, Box<dyn std::error::Error>> {
+    let GroupTemplateArgs {
+        wasm,
+        entrypoint,
+        shell,
+        root,
+        timeout,
+        requires_unmetered,
+        env,
+    } = args;
     let (engine, shell_command, artifact_sha256) = if let Some(wasm_path) = wasm {
         let bytecode = tokio::fs::read(&wasm_path).await.map_err(|e| {
             format!(
@@ -1456,13 +1469,15 @@ async fn handle_group_command(
         } => {
             let template = resolve_group_template(
                 client,
-                wasm,
-                entrypoint,
-                shell,
-                root,
-                timeout,
-                requires_unmetered,
-                env,
+                GroupTemplateArgs {
+                    wasm,
+                    entrypoint,
+                    shell,
+                    root,
+                    timeout,
+                    requires_unmetered,
+                    env,
+                },
             )
             .await?;
             let res = client
@@ -1519,13 +1534,15 @@ async fn handle_group_command(
             };
             let template = resolve_group_template(
                 client,
-                wasm,
-                entrypoint,
-                shell,
-                root,
-                timeout,
-                requires_unmetered,
-                env,
+                GroupTemplateArgs {
+                    wasm,
+                    entrypoint,
+                    shell,
+                    root,
+                    timeout,
+                    requires_unmetered,
+                    env,
+                },
             )
             .await?;
             let res = client

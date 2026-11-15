@@ -175,6 +175,8 @@ fn spike_task_spec_wasm_bytecode_payload_bounds() {
             .to_string(),
         requires_unmetered: false,
         artifact_url: "https://cdn.androgrid.net/wasm/task_501.wasm".to_string(),
+        group_id: String::new(),
+        group_epoch: 0,
     };
 
     let response = ClaimCellularTaskResponse {

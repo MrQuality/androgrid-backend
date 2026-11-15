@@ -1426,15 +1426,16 @@ fn build_partition_task_record(
 }
 
 fn queue_wifi_cancel(inner: &mut SchedulerInner, task: &TaskRecord) {
-    for node_opt in [&task.assigned_node_id, &task.speculative_node_id] {
-        if let Some(node_id) = node_opt {
-            let queue = inner
-                .pending_cancellations
-                .entry(node_id.clone())
-                .or_default();
-            if !queue.contains(&task.spec.task_id) {
-                queue.push(task.spec.task_id.clone());
-            }
+    for node_id in [&task.assigned_node_id, &task.speculative_node_id]
+        .into_iter()
+        .flatten()
+    {
+        let queue = inner
+            .pending_cancellations
+            .entry(node_id.clone())
+            .or_default();
+        if !queue.contains(&task.spec.task_id) {
+            queue.push(task.spec.task_id.clone());
         }
     }
 }
@@ -2104,8 +2105,16 @@ mod tests {
             .unwrap();
 
         // Lease one partition on cellular and one on Wi-Fi
+        scheduler
+            .register_node(
+                "cell_g2".to_string(),
+                make_test_capabilities(false, true),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
         let cell_claim = scheduler
-            .claim_cellular_task("cell_g2", make_test_capabilities(false, true), 90, false, 10)
+            .claim_cellular_task_nominal("cell_g2", 90, false, 10)
             .unwrap();
         let cell_task = cell_claim.task.unwrap();
         let wifi_sync = scheduler
@@ -2187,8 +2196,16 @@ mod tests {
             )
             .unwrap();
 
+        scheduler
+            .register_node(
+                "cell_d1".to_string(),
+                make_test_capabilities(false, true),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
         let cell_claim = scheduler
-            .claim_cellular_task("cell_d1", make_test_capabilities(false, true), 90, false, 10)
+            .claim_cellular_task_nominal("cell_d1", 90, false, 10)
             .unwrap();
         let leased_e1 = cell_claim.task.unwrap();
 

@@ -16,6 +16,7 @@
   - [ADR-003: Monotonic Attempt Fencing and Lock-Free CAS Consensus](adr/ADR-003-monotonic-attempt-fencing-cas.md)
   - [ADR-004: Speculative Preemption and Dual-Assignment](adr/ADR-004-speculative-preemption-dual-assignment.md)
   - [ADR-005: Interface Segregation Principle for AdminService vs AndroGridService](adr/ADR-005-interface-segregation-admin-vs-worker.md)
+  - [ADR-006: TaskGroup Workload Abstraction and Atomic Epoch Replacement](adr/ADR-006-task-group-epoch-replacement.md)
 - [Feature Architecture Decision Records](adr/ADR-001-documentation-portal.md)
   - [ADR-001: Documentation Portal](adr/ADR-001-documentation-portal.md)
   - [ADR-002: Release Automation](adr/ADR-002-release-automation.md)

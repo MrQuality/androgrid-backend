@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Concurrency Stress Spike: Atomic CAS Consensus & Race Resolution
 //!
 //! Simulates high-contention concurrent worker submissions and preemption races

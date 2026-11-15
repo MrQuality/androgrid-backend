@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! End-to-End Live Integration Spike: Tonic gRPC over Mutual TLS 1.3
 //!
 //! Spawns a live loopback Tonic server enforcing Rustls mTLS 1.3, executes all 4 canonical RPCs,

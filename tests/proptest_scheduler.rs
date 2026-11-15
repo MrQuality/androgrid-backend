@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Property-Based Testing for Scheduler Invariants
 //!
 //! Verifies monotonic attempt fencing, capability sanitization, and state progression

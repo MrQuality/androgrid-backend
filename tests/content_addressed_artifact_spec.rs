@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Content-Addressed Artifact Distribution & WASM Toolchain Integration Specification
 //!
 //! Validates the decoupled WebAssembly distribution pipeline, embedded HTTP artifact server,

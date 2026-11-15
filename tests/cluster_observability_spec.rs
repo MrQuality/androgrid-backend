@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! Integration and Verification Suite for Cluster Observability and TUI
 //!
 //! Verifies embedded web dashboard HTTP endpoints, Server-Sent Events (SSE) broadcast,

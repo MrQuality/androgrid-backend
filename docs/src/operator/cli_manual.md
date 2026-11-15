@@ -409,3 +409,46 @@ Options:
 androgrid-cli top --endpoint https://127.0.0.1:50051 --refresh-rate 1
 ```
 
+---
+
+### `androgrid-cli group`
+
+Manages multi-partition `TaskGroup` workloads and atomic epoch replacements (`ADR-006`). For WASM workloads, `submit` and `replace` automatically upload the `.wasm` binary to `ArtifactStore` via `UploadArtifact` and reference its SHA-256 digest in `TaskTemplate` (`[NFR-PERF-001]`).
+
+Traceability: `[REQ-OP-004]`, `[INV-004]`, `[INV-006]`, `[NFR-PERF-001]`, `[NFR-REL-001]`.
+
+#### Subcommands
+
+- `androgrid-cli group submit`: Enqueues a new `TaskGroup` with `1..=1000` partitions (`{group_id}:e1:p{index}`).
+  - `--group-id <ID>` (required, `^[a-zA-Z0-9_-]{1,64}$`), `--partitions <N>` (default `1`), `--wasm <PATH>` or `--shell <CMD>` (`--root` optional), `--entrypoint <SYM>` (default `_start`), `--timeout <SECS>` (default `120`), `--requires-unmetered`, `--env <KEY=VALUE>`.
+- `androgrid-cli group replace`: Atomically replaces a `TaskGroup` with a new epoch (`group_epoch + 1`).
+  - `--group-id <ID>` (required), `--expected-epoch <EPOCH>` (optional optimistic CAS guard), `--strategy <immediate|drain>` (default `immediate`), `--partitions <N>` (default `1`), plus `--wasm` / `--shell` / `--timeout` / `--requires-unmetered` / `--env`.
+- `androgrid-cli group cancel`: Cancels an active or draining `TaskGroup` and all non-terminal partitions.
+  - `--group-id <ID>` (required), `--expected-epoch <EPOCH>` (optional optimistic CAS guard).
+- `androgrid-cli group status`: Displays aggregate epoch and per-state partition counts (`pending`, `leased`, `running`, `completed`, `failed`, `timed_out`, `cancelled`, `preempted`, `previous_epoch_draining_tasks`).
+  - `--group-id <ID>` (required), `--include-tasks` (optional per-partition table).
+- `androgrid-cli group list`: Lists registered `TaskGroup` summaries.
+  - `--state <active|draining|completed|failed|cancelled>` (optional filter).
+
+#### Example: Submit and Atomically Replace a WASM TaskGroup
+```bash
+# Submit epoch 1 with 4 partitions
+androgrid-cli group submit \
+  --group-id img-batch \
+  --partitions 4 \
+  --wasm ./workloads/v1.wasm \
+  --timeout 60
+
+# Atomically upgrade to v2 with optimistic CAS check and immediate preemption
+androgrid-cli group replace \
+  --group-id img-batch \
+  --expected-epoch 1 \
+  --strategy immediate \
+  --partitions 4 \
+  --wasm ./workloads/v2.wasm
+
+# Inspect aggregate status and per-partition states
+androgrid-cli group status --group-id img-batch --include-tasks
+```
+
+

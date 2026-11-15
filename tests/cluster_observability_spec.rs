@@ -471,6 +471,7 @@ fn test_tui_state_mapping_and_test_backend_rendering() {
             failed_tasks: 0,
             preempted_tasks: 0,
             timed_out_tasks: 0,
+            cancelled_tasks: 0,
         },
         timestamp_epoch_ms: 1000,
     };

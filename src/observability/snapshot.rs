@@ -22,6 +22,7 @@ pub struct ClusterMetrics {
     pub failed_tasks: usize,
     pub preempted_tasks: usize,
     pub timed_out_tasks: usize,
+    pub cancelled_tasks: usize,
 }
 
 /// Worker node state snapshot.

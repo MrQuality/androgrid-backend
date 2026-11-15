@@ -855,6 +855,7 @@ impl ClusterScheduler {
         let mut failed_tasks = 0;
         let mut preempted_tasks = 0;
         let mut timed_out_tasks = 0;
+        let mut cancelled_tasks = 0;
 
         let tasks: Vec<crate::observability::TaskSnapshot> = inner
             .tasks
@@ -888,6 +889,10 @@ impl ClusterScheduler {
                     TaskState::TimedOut => {
                         timed_out_tasks += 1;
                         "TimedOut"
+                    }
+                    TaskState::Cancelled => {
+                        cancelled_tasks += 1;
+                        "Cancelled"
                     }
                     _ => "Unknown",
                 }
@@ -942,6 +947,7 @@ impl ClusterScheduler {
             failed_tasks,
             preempted_tasks,
             timed_out_tasks,
+            cancelled_tasks,
         };
 
         crate::observability::ClusterSnapshot {

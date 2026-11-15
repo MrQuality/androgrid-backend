@@ -358,6 +358,7 @@ impl BenchmarkDispatcher {
                     break;
                 } else if status_res.state == TaskState::Failed as i32
                     || status_res.state == TaskState::TimedOut as i32
+                    || status_res.state == TaskState::Cancelled as i32
                 {
                     return Err(BenchmarkError::TaskExecutionFailed {
                         tile_index: tile.tile_index,

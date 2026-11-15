@@ -74,4 +74,24 @@ pub enum ClusterEvent {
     TaskCancelled { task_id: String },
     /// Task lease timed out.
     TaskTimedOut { task_id: String },
+    /// TaskGroup admitted at epoch 1.
+    TaskGroupSubmitted {
+        group_id: String,
+        group_epoch: u64,
+        total_tasks: u32,
+    },
+    /// TaskGroup atomically replaced with a new epoch.
+    TaskGroupReplaced {
+        group_id: String,
+        new_epoch: u64,
+        cancelled_tasks: u32,
+        draining_tasks: u32,
+        created_tasks: u32,
+    },
+    /// TaskGroup cancelled by operator.
+    TaskGroupCancelled {
+        group_id: String,
+        epoch: u64,
+        cancelled_tasks: u32,
+    },
 }

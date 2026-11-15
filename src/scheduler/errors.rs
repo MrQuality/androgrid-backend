@@ -96,4 +96,15 @@ pub enum SchedulingError {
 
     #[error("Invalid TaskGroup partitions: {0}")]
     InvalidGroupPartitions(String),
+
+    /// Traces to: [REQ-OP-004], [INV-004]
+    #[error("Task '{0}' was cancelled")]
+    TaskCancelled(String),
+
+    /// Traces to: [INV-006], [REQ-OP-004]
+    #[error("Invalid TaskTemplate: {0}")]
+    InvalidTaskTemplate(String),
+
+    #[error("Task ID collision: {0}")]
+    TaskIdCollision(String),
 }

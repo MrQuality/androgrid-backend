@@ -204,6 +204,18 @@ impl ClusterScheduler {
     pub fn submit_task(&self, spec: TaskSpec) -> Result<(), SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         let task_id = spec.task_id.clone();
+        if is_reserved_group_task_id(&task_id) {
+            return Err(SchedulingError::TaskIdCollision(format!(
+                "task_id '{}' uses reserved TaskGroup partition format '<group>:e<epoch>:p<index>'",
+                task_id
+            )));
+        }
+        if inner.tasks.contains_key(&task_id) {
+            return Err(SchedulingError::TaskIdCollision(format!(
+                "task_id '{}' already exists",
+                task_id
+            )));
+        }
         let engine_str = match spec.engine {
             1 => "WasmWasi",
             2 => "RootShell",
@@ -581,7 +593,7 @@ impl ClusterScheduler {
                         }
                     }
                 }
-                return Err(SchedulingError::AlreadyFinalized(request.task_id.clone()));
+                return Err(SchedulingError::TaskCancelled(request.task_id.clone()));
             }
             if is_terminal_task_state(task.state) {
                 return Err(SchedulingError::AlreadyFinalized(request.task_id.clone()));
@@ -625,7 +637,11 @@ impl ClusterScheduler {
 
         let committed_group_id = task.group_id.clone();
         if let Some(gid) = committed_group_id {
-            reconcile_group_state(&mut inner, &gid, 0);
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            reconcile_group_state(&mut inner, &gid, now_ms);
         }
 
         drop(inner);
@@ -950,6 +966,14 @@ impl ClusterScheduler {
             return Err(SchedulingError::AlreadyFinalized(task_id.to_string()));
         }
 
+        if task.group_id.is_some() {
+            return Err(SchedulingError::InvalidStateTransition {
+                task_id: task_id.to_string(),
+                from: format!("{:?}", task.state),
+                to: "Cancelled (use CancelTaskGroup for group-owned tasks)".to_string(),
+            });
+        }
+
         task.state = TaskState::Failed;
         task.result = Some(TaskExecutionResult {
             exit_code: -1,
@@ -1001,6 +1025,7 @@ impl ClusterScheduler {
         let template = group.template.ok_or_else(|| {
             SchedulingError::InvalidGroupPartitions("template is required".to_string())
         })?;
+        validate_task_template(&template)?;
 
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
@@ -1019,6 +1044,12 @@ impl ClusterScheduler {
         for (idx, part) in group.partitions.iter().enumerate() {
             let record = build_partition_task_record(&group.group_id, epoch, idx, &template, part);
             let tid = record.spec.task_id.clone();
+            if inner.tasks.contains_key(&tid) {
+                return Err(SchedulingError::TaskIdCollision(format!(
+                    "partition task_id '{}' already exists",
+                    tid
+                )));
+            }
             task_ids.push(tid.clone());
             inner.tasks.insert(tid, record);
         }
@@ -1036,6 +1067,12 @@ impl ClusterScheduler {
                 updated_at_epoch_ms: now_epoch_ms,
             },
         );
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupSubmitted {
+            group_id: group.group_id.clone(),
+            group_epoch: epoch,
+            total_tasks: total as u32,
+        });
 
         Ok(SubmitTaskGroupResponse {
             accepted: true,
@@ -1059,6 +1096,7 @@ impl ClusterScheduler {
         let template = req.template.ok_or_else(|| {
             SchedulingError::InvalidGroupPartitions("template is required".to_string())
         })?;
+        validate_task_template(&template)?;
 
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
         if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
@@ -1079,7 +1117,10 @@ impl ClusterScheduler {
             )
         };
 
-        if current_state == TaskGroupState::Cancelled {
+        if current_state == TaskGroupState::Cancelled
+            || current_state == TaskGroupState::Completed
+            || current_state == TaskGroupState::Failed
+        {
             return Err(SchedulingError::GroupTerminal(req.group_id));
         }
 
@@ -1164,6 +1205,14 @@ impl ClusterScheduler {
             group.draining_task_ids = draining_ids;
             group.updated_at_epoch_ms = now_epoch_ms;
         }
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupReplaced {
+            group_id: req.group_id.clone(),
+            new_epoch,
+            cancelled_tasks: cancelled_count,
+            draining_tasks: draining_count,
+            created_tasks: created_count as u32,
+        });
 
         Ok(ReplaceTaskGroupResponse {
             accepted: true,
@@ -1234,6 +1283,12 @@ impl ClusterScheduler {
             group.draining_task_ids.clear();
             group.updated_at_epoch_ms = now_epoch_ms;
         }
+        drop(inner);
+        self.emit_event(crate::observability::ClusterEvent::TaskGroupCancelled {
+            group_id: group_id.to_string(),
+            epoch,
+            cancelled_tasks: cancelled_count,
+        });
 
         Ok(CancelTaskGroupResponse {
             cancelled: true,
@@ -1396,6 +1451,48 @@ fn validate_partitions(partitions: &[TaskPartitionSpec]) -> Result<(), Schedulin
     Ok(())
 }
 
+fn validate_task_template(template: &TaskTemplate) -> Result<(), SchedulingError> {
+    let engine = ExecutionEngine::try_from(template.engine).map_err(|_| {
+        SchedulingError::InvalidTaskTemplate(format!("unknown execution engine {}", template.engine))
+    })?;
+    match engine {
+        ExecutionEngine::WasmWasi => {}
+        ExecutionEngine::ToyboxUser | ExecutionEngine::RootShell => {
+            if template.shell_command.trim().is_empty() {
+                return Err(SchedulingError::InvalidTaskTemplate(
+                    "shell_command must not be empty for shell execution engines".to_string(),
+                ));
+            }
+        }
+        ExecutionEngine::Unspecified => {
+            return Err(SchedulingError::InvalidTaskTemplate(
+                "execution engine must be WasmWasi, ToyboxUser, or RootShell".to_string(),
+            ));
+        }
+    }
+    if template.timeout_seconds == 0 {
+        return Err(SchedulingError::InvalidTaskTemplate(
+            "timeout_seconds must be greater than 0".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn is_reserved_group_task_id(task_id: &str) -> bool {
+    let mut parts = task_id.rsplitn(3, ':');
+    let (Some(p_part), Some(e_part), Some(g_part)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    !g_part.is_empty()
+        && e_part.starts_with('e')
+        && e_part.len() > 1
+        && e_part[1..].bytes().all(|b| b.is_ascii_digit())
+        && p_part.starts_with('p')
+        && p_part.len() > 1
+        && p_part[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
 #[allow(deprecated)]
 fn build_partition_task_record(
     group_id: &str,
@@ -1479,7 +1576,7 @@ fn reconcile_group_state(inner: &mut SchedulerInner, group_id: &str, now_epoch_m
         }
     }
 
-    let next_state = if all_terminal {
+    let next_state = if all_terminal && draining_ids.is_empty() {
         if any_failed {
             TaskGroupState::Failed
         } else if all_cancelled {

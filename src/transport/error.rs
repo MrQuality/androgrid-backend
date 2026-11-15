@@ -137,6 +137,19 @@ impl From<SchedulingError> for Status {
             SchedulingError::InvalidGroupPartitions(msg) => {
                 Status::invalid_argument(format!("INVALID_GROUP_PARTITIONS: {}", msg))
             }
+
+            SchedulingError::TaskCancelled(task_id) => Status::failed_precondition(format!(
+                "TASK_CANCELLED: task '{}' was cancelled",
+                task_id
+            )),
+
+            SchedulingError::InvalidTaskTemplate(msg) => {
+                Status::invalid_argument(format!("INVALID_TASK_TEMPLATE: {}", msg))
+            }
+
+            SchedulingError::TaskIdCollision(msg) => {
+                Status::already_exists(format!("TASK_ID_COLLISION: {}", msg))
+            }
         }
     }
 }

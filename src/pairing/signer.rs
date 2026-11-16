@@ -190,11 +190,10 @@ impl CaSigner {
             )));
         }
 
-        let (_, csr) =
-            x509_parser::certification_request::X509CertificationRequest::from_der(
-                blocks[0].contents(),
-            )
-            .map_err(|e| SignerError::InvalidCsr(e.to_string()))?;
+        let (_, csr) = x509_parser::certification_request::X509CertificationRequest::from_der(
+            blocks[0].contents(),
+        )
+        .map_err(|e| SignerError::InvalidCsr(e.to_string()))?;
 
         let spki = &csr.certification_request_info.subject_pki;
         let alg_oid = spki.algorithm.algorithm.to_id_string();
@@ -254,12 +253,13 @@ impl CaSigner {
             });
         }
 
-        let effective_days = if now_secs + i64::from(days_valid) * 86_400 > self.ca_not_after_epoch_secs {
-            let max_days = (ca_remaining_secs / 86_400).max(1) as u32;
-            max_days.min(days_valid)
-        } else {
-            days_valid
-        };
+        let effective_days =
+            if now_secs + i64::from(days_valid) * 86_400 > self.ca_not_after_epoch_secs {
+                let max_days = (ca_remaining_secs / 86_400).max(1) as u32;
+                max_days.min(days_valid)
+            } else {
+                days_valid
+            };
 
         let signed = self.sign_worker_csr_with_days(csr_pem, expected_node_id, effective_days)?;
         let leaf_der = parse_single_cert_der(&signed.client_cert_pem)?;

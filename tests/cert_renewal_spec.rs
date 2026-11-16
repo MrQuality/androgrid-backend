@@ -64,7 +64,9 @@ impl RenewalTestPki {
             .push(DnType::CommonName, "androgrid-orchestrator");
         server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let server_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).unwrap();
-        let server_cert = server_params.signed_by(&server_key, &ca_cert, &ca_key).unwrap();
+        let server_cert = server_params
+            .signed_by(&server_key, &ca_cert, &ca_key)
+            .unwrap();
 
         let ca_signer = Arc::new(CaSigner::from_pem(&ca_cert_pem, &ca_key_pem).unwrap());
 
@@ -322,7 +324,10 @@ async fn test_renewal_manager_policy_edge_cases() {
     };
 
     // 1. Missing AuthenticatedPeer (non-mTLS) -> Unauthenticated
-    let mgr = CertRenewalManager::new(Some(Arc::clone(&pki.ca_signer)), CertRenewalPolicy::default());
+    let mgr = CertRenewalManager::new(
+        Some(Arc::clone(&pki.ca_signer)),
+        CertRenewalPolicy::default(),
+    );
     let (csr1, _) = build_p256_csr("worker-policy");
     let err = mgr.renew_certificate(None, &csr1).await.unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);

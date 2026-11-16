@@ -309,13 +309,7 @@ impl ClusterScheduler {
                 task_id
             )));
         }
-        if !spec.node_group_affinity.is_empty()
-            && !inner.node_groups.contains_key(&spec.node_group_affinity)
-        {
-            return Err(SchedulingError::NodeGroupNotFound(
-                spec.node_group_affinity.clone(),
-            ));
-        }
+        validate_node_group_affinity(&inner.node_groups, &spec.node_group_affinity)?;
         let engine_str = match spec.engine {
             1 => "WasmWasi",
             2 => "RootShell",
@@ -432,23 +426,14 @@ impl ClusterScheduler {
                 continue;
             }
 
-            // [INV-006] and Insecure Root Guard:
-            // 1. Unrooted workers must never receive root shell payloads
-            // 2. Root tasks require explicit cluster flag allow_insecure_root_tasks
-            if record.spec.engine == ExecutionEngine::RootShell as i32
-                && (!is_rooted || !allow_root)
-            {
-                continue;
-            }
-
-            if !record.spec.node_group_affinity.is_empty()
-                && !is_worker_in_node_group(
-                    &inner.node_groups,
-                    &worker_snapshot,
-                    worker_effective_labels.as_ref(),
-                    &record.spec.node_group_affinity,
-                )
-            {
+            if !is_task_eligible_for_worker(
+                &record.spec,
+                is_rooted,
+                allow_root,
+                &inner.node_groups,
+                &worker_snapshot,
+                worker_effective_labels.as_ref(),
+            ) {
                 continue;
             }
 
@@ -554,10 +539,7 @@ impl ClusterScheduler {
                 || worker.capabilities.current_transport
                     == NetworkTransportType::NetworkTransportWifiLan as i32;
             let desired_version = if unmetered {
-                match worker.desired_client_version.as_deref() {
-                    Some(target) if target != worker.client_version => target.to_string(),
-                    _ => String::new(),
-                }
+                pending_desired_version(worker)
             } else {
                 String::new()
             };
@@ -645,19 +627,14 @@ impl ClusterScheduler {
             // First priority: dispatch any pending unassigned tasks
             for record in inner_ref.tasks.values_mut() {
                 if record.state == TaskState::Pending {
-                    if record.spec.engine == ExecutionEngine::RootShell as i32
-                        && (!is_rooted || !allow_root)
-                    {
-                        continue;
-                    }
-                    if !record.spec.node_group_affinity.is_empty()
-                        && !is_worker_in_node_group(
-                            &inner_ref.node_groups,
-                            &worker_snapshot,
-                            worker_effective_labels.as_ref(),
-                            &record.spec.node_group_affinity,
-                        )
-                    {
+                    if !is_task_eligible_for_worker(
+                        &record.spec,
+                        is_rooted,
+                        allow_root,
+                        &inner_ref.node_groups,
+                        &worker_snapshot,
+                        worker_effective_labels.as_ref(),
+                    ) {
                         continue;
                     }
                     record.state = TaskState::Leased;
@@ -683,19 +660,14 @@ impl ClusterScheduler {
                     if record.state == TaskState::Leased
                         && record.assigned_node_id.as_deref() != Some(node_id)
                     {
-                        if record.spec.engine == ExecutionEngine::RootShell as i32
-                            && (!is_rooted || !allow_root)
-                        {
-                            continue;
-                        }
-                        if !record.spec.node_group_affinity.is_empty()
-                            && !is_worker_in_node_group(
-                                &inner_ref.node_groups,
-                                &worker_snapshot,
-                                worker_effective_labels.as_ref(),
-                                &record.spec.node_group_affinity,
-                            )
-                        {
+                        if !is_task_eligible_for_worker(
+                            &record.spec,
+                            is_rooted,
+                            allow_root,
+                            &inner_ref.node_groups,
+                            &worker_snapshot,
+                            worker_effective_labels.as_ref(),
+                        ) {
                             continue;
                         }
 
@@ -912,14 +884,13 @@ impl ClusterScheduler {
             .workers
             .iter()
             .map(|(node_id, worker)| {
-                let effective_labels: HashMap<String, String> =
-                    worker.effective_labels().into_iter().collect();
+                let effective_btree = worker.effective_labels();
                 let node_group =
-                    resolve_effective_node_group(&inner.node_groups, worker).unwrap_or_default();
-                let desired_client_version = match worker.desired_client_version.as_deref() {
-                    Some(target) if target != worker.client_version => target.to_string(),
-                    _ => String::new(),
-                };
+                    resolve_effective_node_group(&inner.node_groups, worker, &effective_btree)
+                        .unwrap_or_default();
+                let effective_labels: HashMap<String, String> =
+                    effective_btree.into_iter().collect();
+                let desired_client_version = pending_desired_version(worker);
                 crate::WorkerNodeInfo {
                     node_id: node_id.clone(),
                     capabilities: Some(worker.capabilities.clone()),
@@ -1228,15 +1199,7 @@ impl ClusterScheduler {
         {
             return Err(SchedulingError::RootShellExecutionDisabled);
         }
-        if !template.node_group_affinity.is_empty()
-            && !inner
-                .node_groups
-                .contains_key(&template.node_group_affinity)
-        {
-            return Err(SchedulingError::NodeGroupNotFound(
-                template.node_group_affinity.clone(),
-            ));
-        }
+        validate_node_group_affinity(&inner.node_groups, &template.node_group_affinity)?;
         if inner.groups.contains_key(&group.group_id) {
             return Err(SchedulingError::GroupAlreadyExists(group.group_id));
         }
@@ -1308,15 +1271,7 @@ impl ClusterScheduler {
         {
             return Err(SchedulingError::RootShellExecutionDisabled);
         }
-        if !template.node_group_affinity.is_empty()
-            && !inner
-                .node_groups
-                .contains_key(&template.node_group_affinity)
-        {
-            return Err(SchedulingError::NodeGroupNotFound(
-                template.node_group_affinity.clone(),
-            ));
-        }
+        validate_node_group_affinity(&inner.node_groups, &template.node_group_affinity)?;
 
         let (current_epoch, current_state, prev_current_ids, prev_draining_ids) = {
             let group = inner
@@ -1746,10 +1701,22 @@ impl ClusterScheduler {
     /// Traces to: [REQ-OP-001], [NFR-PERF-001]
     pub fn list_node_groups(&self) -> Vec<NodeGroup> {
         let inner = self.inner.read().expect("RwLock read lock poisoned");
+        let cached_workers: Vec<(&WorkerRecord, Option<BTreeMap<String, String>>)> = inner
+            .workers
+            .values()
+            .map(|w| {
+                let labels = if w.explicit_node_group.is_none() {
+                    Some(w.effective_labels())
+                } else {
+                    None
+                };
+                (w, labels)
+            })
+            .collect();
         let mut out: Vec<NodeGroup> = inner
             .node_groups
             .values()
-            .map(|rec| build_node_group_proto(rec, &inner.workers))
+            .map(|rec| build_node_group_proto_cached(rec, &cached_workers))
             .collect();
         out.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         out
@@ -2212,6 +2179,61 @@ fn validate_node_id_batch(
     Ok(out)
 }
 
+fn pending_desired_version(worker: &WorkerRecord) -> String {
+    match worker.desired_client_version.as_deref() {
+        Some(target) if target != worker.client_version => target.to_string(),
+        _ => String::new(),
+    }
+}
+
+fn validate_node_group_affinity(
+    node_groups: &HashMap<String, NodeGroupRecord>,
+    affinity: &str,
+) -> Result<(), SchedulingError> {
+    if affinity.is_empty() {
+        return Ok(());
+    }
+    validate_group_id(affinity)?;
+    if !node_groups.contains_key(affinity) {
+        return Err(SchedulingError::NodeGroupNotFound(affinity.to_string()));
+    }
+    Ok(())
+}
+
+fn is_task_eligible_for_worker(
+    spec: &TaskSpec,
+    is_rooted: bool,
+    allow_root: bool,
+    node_groups: &HashMap<String, NodeGroupRecord>,
+    worker: &WorkerRecord,
+    cached_effective_labels: Option<&BTreeMap<String, String>>,
+) -> bool {
+    if spec.engine == ExecutionEngine::RootShell as i32 && (!is_rooted || !allow_root) {
+        return false;
+    }
+    if !spec.node_group_affinity.is_empty()
+        && !is_worker_in_node_group(
+            node_groups,
+            worker,
+            cached_effective_labels,
+            &spec.node_group_affinity,
+        )
+    {
+        return false;
+    }
+    true
+}
+
+fn selector_matches_labels(
+    selector: &BTreeMap<String, String>,
+    effective_labels: &BTreeMap<String, String>,
+) -> bool {
+    !selector.is_empty()
+        && selector
+            .iter()
+            .all(|(k, v)| effective_labels.get(k) == Some(v))
+}
+
 fn is_worker_in_node_group(
     node_groups: &HashMap<String, NodeGroupRecord>,
     worker: &WorkerRecord,
@@ -2235,28 +2257,20 @@ fn is_worker_in_node_group(
             &owned_labels
         }
     };
-    group
-        .label_selector
-        .iter()
-        .all(|(k, v)| effective.get(k) == Some(v))
+    selector_matches_labels(&group.label_selector, effective)
 }
 
 fn resolve_effective_node_group(
     node_groups: &HashMap<String, NodeGroupRecord>,
     worker: &WorkerRecord,
+    effective_labels: &BTreeMap<String, String>,
 ) -> Option<String> {
     if let Some(ref explicit) = worker.explicit_node_group {
         return Some(explicit.clone());
     }
-    let effective = worker.effective_labels();
     let mut matches: Vec<&str> = node_groups
         .values()
-        .filter(|g| {
-            !g.label_selector.is_empty()
-                && g.label_selector
-                    .iter()
-                    .all(|(k, v)| effective.get(k) == Some(v))
-        })
+        .filter(|g| selector_matches_labels(&g.label_selector, effective_labels))
         .map(|g| g.group_id.as_str())
         .collect();
     matches.sort_unstable();
@@ -2267,17 +2281,31 @@ fn build_node_group_proto(
     record: &NodeGroupRecord,
     workers: &HashMap<String, WorkerRecord>,
 ) -> NodeGroup {
-    let active_node_count = workers
+    let cached: Vec<(&WorkerRecord, Option<BTreeMap<String, String>>)> = workers
         .values()
-        .filter(|w| {
+        .map(|w| {
+            let labels = if w.explicit_node_group.is_none() && !record.label_selector.is_empty() {
+                Some(w.effective_labels())
+            } else {
+                None
+            };
+            (w, labels)
+        })
+        .collect();
+    build_node_group_proto_cached(record, &cached)
+}
+
+fn build_node_group_proto_cached(
+    record: &NodeGroupRecord,
+    workers: &[(&WorkerRecord, Option<BTreeMap<String, String>>)],
+) -> NodeGroup {
+    let active_node_count = workers
+        .iter()
+        .filter(|(w, cached_labels)| {
             if let Some(ref explicit) = w.explicit_node_group {
                 explicit == &record.group_id
-            } else if !record.label_selector.is_empty() {
-                let effective = w.effective_labels();
-                record
-                    .label_selector
-                    .iter()
-                    .all(|(k, v)| effective.get(k) == Some(v))
+            } else if let Some(ref effective) = cached_labels {
+                selector_matches_labels(&record.label_selector, effective)
             } else {
                 false
             }

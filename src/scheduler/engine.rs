@@ -172,6 +172,19 @@ impl ClusterScheduler {
         labels: HashMap<String, String>,
         now_epoch_ms: u64,
     ) -> Result<RegisterNodeResponse, SchedulingError> {
+        if node_id.is_empty()
+            || node_id.len() > 128
+            || !node_id.bytes().all(|b| (0x21..=0x7E).contains(&b))
+        {
+            return Err(SchedulingError::InvalidNodeGroupRequest(
+                "node_id must be 1..=128 printable non-whitespace ASCII chars".to_string(),
+            ));
+        }
+        if client_version.len() > 128 {
+            return Err(SchedulingError::InvalidNodeGroupRequest(
+                "client_version must not exceed 128 bytes".to_string(),
+            ));
+        }
         let validated_labels = validate_labels(&labels, false)?;
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
@@ -195,27 +208,40 @@ impl ClusterScheduler {
         let battery_temperature_celsius = capabilities.battery_temperature_celsius;
         let thermal_status = capabilities.thermal_status;
 
-        let (explicit_node_group, draining, active_task_ids, desired_client_version) =
-            if let Some(existing) = inner.workers.get(&node_id) {
-                let next_desired = match existing.desired_client_version.as_deref() {
-                    Some(target) if target == client_version => None,
-                    Some(target) => Some(target.to_string()),
-                    None => None,
-                };
-                (
-                    existing.explicit_node_group.clone(),
-                    existing.draining,
-                    existing.active_task_ids.clone(),
-                    next_desired,
-                )
-            } else {
-                let pre_pinned = inner
-                    .node_groups
-                    .iter()
-                    .find(|(_, grp)| grp.member_node_ids.contains(&node_id))
-                    .map(|(gid, _)| gid.clone());
-                (pre_pinned, false, Vec::new(), None)
+        let (
+            explicit_node_group,
+            draining,
+            drained_for_upgrade,
+            active_task_ids,
+            desired_client_version,
+        ) = if let Some(existing) = inner.workers.get(&node_id) {
+            let (next_desired, upgrade_completed) = match existing.desired_client_version.as_deref()
+            {
+                Some(target) if target == client_version => (None, true),
+                Some(target) => (Some(target.to_string()), false),
+                None => (None, false),
             };
+            let (next_draining, next_drained_for_upgrade) =
+                if upgrade_completed && existing.drained_for_upgrade {
+                    (false, false)
+                } else {
+                    (existing.draining, existing.drained_for_upgrade)
+                };
+            (
+                existing.explicit_node_group.clone(),
+                next_draining,
+                next_drained_for_upgrade,
+                existing.active_task_ids.clone(),
+                next_desired,
+            )
+        } else {
+            let pre_pinned = inner
+                .node_groups
+                .iter()
+                .find(|(_, grp)| grp.member_node_ids.contains(&node_id))
+                .map(|(gid, _)| gid.clone());
+            (pre_pinned, false, false, Vec::new(), None)
+        };
 
         let worker = WorkerRecord {
             node_id: node_id.clone(),
@@ -231,6 +257,7 @@ impl ClusterScheduler {
             labels: validated_labels,
             explicit_node_group,
             draining,
+            drained_for_upgrade,
             desired_client_version,
         };
 
@@ -1835,6 +1862,7 @@ impl ClusterScheduler {
         for nid in &target_ids {
             if let Some(w) = inner.workers.get_mut(nid) {
                 w.draining = req.drain;
+                w.drained_for_upgrade = false;
             }
         }
 
@@ -1877,8 +1905,9 @@ impl ClusterScheduler {
                     continue;
                 }
                 w.desired_client_version = Some(target_version.clone());
-                if req.drain_before_upgrade {
+                if req.drain_before_upgrade && !w.draining {
                     w.draining = true;
+                    w.drained_for_upgrade = true;
                 }
                 targeted.push(nid);
             }

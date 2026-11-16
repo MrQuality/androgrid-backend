@@ -100,6 +100,7 @@ pub struct WorkerRecord {
     pub labels: BTreeMap<String, String>,
     pub explicit_node_group: Option<String>,
     pub draining: bool,
+    pub drained_for_upgrade: bool,
     pub desired_client_version: Option<String>,
 }
 

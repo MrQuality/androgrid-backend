@@ -3582,7 +3582,7 @@ mod tests {
         assert!(n1.draining);
         assert_eq!(n1.desired_client_version, "0.2.0");
 
-        // Re-register with target version 0.2.0: clears desired_client_version, preserves draining & group
+        // Re-register with target version 0.2.0: clears desired_client_version and upgrade drain, preserves group
         scheduler
             .register_node(
                 "node-1".to_string(),
@@ -3593,7 +3593,7 @@ mod tests {
             .unwrap();
         let n1_upgraded = &scheduler.list_worker_nodes()[0];
         assert_eq!(n1_upgraded.node_group, "group-b");
-        assert!(n1_upgraded.draining);
+        assert!(!n1_upgraded.draining);
         assert_eq!(n1_upgraded.desired_client_version, "");
 
         // Unassign idempotency

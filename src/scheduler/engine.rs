@@ -520,9 +520,13 @@ impl ClusterScheduler {
             let unmetered = !worker.capabilities.is_metered
                 || worker.capabilities.current_transport
                     == NetworkTransportType::NetworkTransportWifiLan as i32;
-            let desired_version = match worker.desired_client_version.as_deref() {
-                Some(target) if target != worker.client_version => target.to_string(),
-                _ => String::new(),
+            let desired_version = if unmetered {
+                match worker.desired_client_version.as_deref() {
+                    Some(target) if target != worker.client_version => target.to_string(),
+                    _ => String::new(),
+                }
+            } else {
+                String::new()
             };
 
             (
@@ -1858,6 +1862,7 @@ impl ClusterScheduler {
         for nid in candidate_ids {
             if let Some(w) = inner.workers.get_mut(&nid) {
                 if w.client_version == target_version {
+                    w.desired_client_version = None;
                     continue;
                 }
                 w.desired_client_version = Some(target_version.clone());

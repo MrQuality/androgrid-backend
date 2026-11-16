@@ -1273,7 +1273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  (No worker nodes currently registered)");
                 } else {
                     println!(
-                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9}",
+                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9} {:<20}",
                         "NODE ID",
                         "CORES",
                         "RAM (MB)",
@@ -1284,9 +1284,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "THERMAL",
                         "TRANSPORT",
                         "NODE GROUP",
-                        "DRAINING"
+                        "DRAINING",
+                        "VERSION"
                     );
-                    println!("{}", "-".repeat(134));
+                    println!("{}", "-".repeat(155));
                     for n in node_outputs {
                         let temp_str = if n.battery_temperature_celsius <= 0 {
                             "N/A".to_string()
@@ -1298,8 +1299,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         } else {
                             n.node_group
                         };
+                        let version_str = if n.desired_client_version.is_empty() {
+                            n.client_version
+                        } else {
+                            format!("{} -> {}", n.client_version, n.desired_client_version)
+                        };
                         println!(
-                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9}",
+                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9} {:<20}",
                             n.node_id,
                             n.cpu_cores,
                             n.ram_mb,
@@ -1310,7 +1316,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             n.thermal_status,
                             n.transport,
                             group_str,
-                            if n.draining { "YES" } else { "NO" }
+                            if n.draining { "YES" } else { "NO" },
+                            version_str
                         );
                     }
                 }

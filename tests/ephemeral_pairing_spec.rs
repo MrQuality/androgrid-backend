@@ -382,6 +382,7 @@ async fn test_live_grpc_enrollment_and_subsequent_mtls_registration() {
             thermal_status: 0,
         }),
         client_version: "0.1.0".to_string(),
+        labels: Default::default(),
     };
 
     let reg_res = andro_client
@@ -479,6 +480,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
             node_id: node_id.to_string(),
             capabilities: None,
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .expect_err("Unauthenticated operational RPC must be rejected");
@@ -529,6 +531,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
                 thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .expect("Authenticated mTLS operational RPC must succeed")
@@ -553,6 +556,7 @@ async fn test_shared_tls_listener_allows_bootstrap_enrollment_and_enforces_opera
                 thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .expect_err("Worker cert must not impersonate another node_id");

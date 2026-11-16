@@ -118,9 +118,13 @@ impl AndroGridService for AndroGridServiceImpl {
             .ok_or_else(|| Status::invalid_argument("NodeCapabilities must be provided"))?;
 
         let now_ms = Self::now_epoch_ms();
-        let response =
-            self.scheduler
-                .register_node(req.node_id, capabilities, req.client_version, now_ms)?;
+        let response = self.scheduler.register_node_with_labels(
+            req.node_id,
+            capabilities,
+            req.client_version,
+            req.labels,
+            now_ms,
+        )?;
 
         Ok(Response::new(response))
     }

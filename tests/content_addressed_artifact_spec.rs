@@ -339,6 +339,7 @@ async fn test_admin_service_upload_and_decoupled_task_dispatch_under_4kb() {
         artifact_url: upload_res.artifact_url.clone(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
 
     let submit_req = SubmitTaskRequest {
@@ -383,6 +384,7 @@ async fn test_admin_service_upload_and_decoupled_task_dispatch_under_4kb() {
             node_id: "worker_node_decoupled".to_string(),
             capabilities: Some(worker_caps.clone()),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .expect("Register node must succeed");
@@ -434,6 +436,7 @@ async fn test_admin_service_upload_and_decoupled_task_dispatch_under_4kb() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     let mut inband_buf = Vec::new();
     ClaimCellularTaskResponse {

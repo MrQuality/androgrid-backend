@@ -34,6 +34,7 @@ prop_compose! {
             artifact_url: String::new(),
             group_id: String::new(),
             group_epoch: 0,
+            node_group_affinity: String::new(),
         }
     }
 }
@@ -76,6 +77,7 @@ proptest! {
             artifact_url: String::new(),
             group_id: String::new(),
             group_epoch: 0,
+            node_group_affinity: String::new(),
         };
 
         scheduler.submit_task(spec).unwrap();
@@ -184,6 +186,7 @@ proptest! {
             artifact_sha256: "a".repeat(64),
             shell_command: String::new(),
             requires_unmetered: false,
+            node_group_affinity: String::new(),
         };
 
         scheduler
@@ -266,6 +269,111 @@ proptest! {
         } else {
             let is_superseded = matches!(res, Err(SchedulingError::GroupSuperseded { .. }));
             prop_assert!(is_superseded);
+        }
+    }
+
+    #[test]
+    fn prop_node_group_affinity_and_drain_invariants(
+        assign_to_a in any::<bool>(),
+        drain_worker in any::<bool>(),
+        target_group_a in any::<bool>(),
+    ) {
+        use androgrid_backend::{CreateNodeGroupRequest, DrainNodesRequest};
+        use std::collections::HashMap;
+
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "grp-a".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "grp-b".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+
+        let caps = NodeCapabilities {
+            is_rooted: false,
+            supported_engines: vec![ExecutionEngine::WasmWasi as i32],
+            cpu_cores: 4,
+            total_ram_bytes: 4 * 1024 * 1024 * 1024,
+            os_version: "14".to_string(),
+            abi: "arm64-v8a".to_string(),
+            is_metered: false,
+            current_transport: NetworkTransportType::NetworkTransportWifiLan as i32,
+            max_cellular_task_duration_seconds: 180,
+            battery_temperature_celsius: 0,
+            thermal_status: 0,
+        };
+        let reg = scheduler
+            .register_node("prop-w1".to_string(), caps, "1.0.0".to_string(), 1000)
+            .unwrap();
+
+        let worker_grp = if assign_to_a { "grp-a" } else { "grp-b" };
+        scheduler
+            .assign_nodes_to_group(
+                androgrid_backend::AssignNodesToGroupRequest {
+                    group_id: worker_grp.to_string(),
+                    node_ids: vec!["prop-w1".to_string()],
+                    unassign: false,
+                },
+                1100,
+            )
+            .unwrap();
+
+        if drain_worker {
+            scheduler
+                .drain_nodes(DrainNodesRequest {
+                    node_group: String::new(),
+                    node_ids: vec!["prop-w1".to_string()],
+                    drain: true,
+                })
+                .unwrap();
+        }
+
+        #[allow(deprecated)]
+        let spec = TaskSpec {
+            task_id: "prop-aff-task".to_string(),
+            run_attempt: 0,
+            engine: ExecutionEngine::WasmWasi as i32,
+            timeout_seconds: 60,
+            entrypoint: "_start".to_string(),
+            env_vars: HashMap::new(),
+            wasm_bytecode: vec![0, 97, 115, 109, 1, 0, 0, 0],
+            shell_command: String::new(),
+            artifact_sha256: "a".repeat(64),
+            requires_unmetered: false,
+            artifact_url: String::new(),
+            group_id: String::new(),
+            group_epoch: 0,
+            node_group_affinity: if target_group_a {
+                "grp-a".to_string()
+            } else {
+                "grp-b".to_string()
+            },
+        };
+        scheduler.submit_task(spec).unwrap();
+
+        let sync = scheduler
+            .sync_node_state("prop-w1", &reg.session_token, &[], 1200)
+            .unwrap();
+        if drain_worker || (assign_to_a != target_group_a) {
+            prop_assert!(sync.desired_tasks.is_empty());
+        } else {
+            prop_assert_eq!(sync.desired_tasks.len(), 1);
         }
     }
 }

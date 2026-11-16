@@ -14,13 +14,16 @@ use crate::pairing::{PairingPayload, PairingTokenStore};
 use crate::scheduler::ClusterScheduler;
 use crate::transport::tls::AuthenticatedPeer;
 use crate::{
-    CancelTaskGroupRequest, CancelTaskGroupResponse, CancelTaskRequest, CancelTaskResponse,
-    GeneratePairingTokenRequest, GeneratePairingTokenResponse, GetTaskGroupStatusRequest,
-    GetTaskGroupStatusResponse, GetTaskStatusRequest, GetTaskStatusResponse, ListTaskGroupsRequest,
-    ListTaskGroupsResponse, ListTasksRequest, ListTasksResponse, ListWorkerNodesRequest,
-    ListWorkerNodesResponse, ReplaceTaskGroupRequest, ReplaceTaskGroupResponse,
-    SubmitTaskGroupRequest, SubmitTaskGroupResponse, SubmitTaskRequest, SubmitTaskResponse,
-    TaskGroupState, TaskState, UploadArtifactRequest, UploadArtifactResponse,
+    AssignNodesToGroupRequest, AssignNodesToGroupResponse, CancelTaskGroupRequest,
+    CancelTaskGroupResponse, CancelTaskRequest, CancelTaskResponse, CreateNodeGroupRequest,
+    CreateNodeGroupResponse, DrainNodesRequest, DrainNodesResponse, GeneratePairingTokenRequest,
+    GeneratePairingTokenResponse, GetTaskGroupStatusRequest, GetTaskGroupStatusResponse,
+    GetTaskStatusRequest, GetTaskStatusResponse, ListNodeGroupsRequest, ListNodeGroupsResponse,
+    ListTaskGroupsRequest, ListTaskGroupsResponse, ListTasksRequest, ListTasksResponse,
+    ListWorkerNodesRequest, ListWorkerNodesResponse, ReplaceTaskGroupRequest,
+    ReplaceTaskGroupResponse, SubmitTaskGroupRequest, SubmitTaskGroupResponse, SubmitTaskRequest,
+    SubmitTaskResponse, TaskGroupState, TaskState, UpdateNodeGroupRequest, UpdateNodeGroupResponse,
+    UpgradeNodesRequest, UpgradeNodesResponse, UploadArtifactRequest, UploadArtifactResponse,
 };
 
 /// Production implementation of AdminService backed by atomic ClusterScheduler.
@@ -165,6 +168,7 @@ impl AdminService for AdminServiceImpl {
                 task_id,
                 message: "Task accepted and enqueued".to_string(),
             })),
+            Err(e @ crate::SchedulingError::NodeGroupNotFound(_)) => Err(Status::from(e)),
             Err(e) => Err(Status::invalid_argument(format!(
                 "Failed to enqueue task: {e}"
             ))),
@@ -497,6 +501,89 @@ impl AdminService for AdminServiceImpl {
         let groups = self.scheduler.list_task_groups(state_filter);
         Ok(Response::new(ListTaskGroupsResponse { groups }))
     }
+
+    /// Creates a new logical NodeGroup for fleet partitioning.
+    ///
+    /// Traces to: [REQ-OP-001], [INV-005], [INV-006], [REQ-VER-002]
+    async fn create_node_group(
+        &self,
+        request: Request<CreateNodeGroupRequest>,
+    ) -> Result<Response<CreateNodeGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let res = self
+            .scheduler
+            .create_node_group(req, Self::current_epoch_ms())?;
+        Ok(Response::new(res))
+    }
+
+    /// Updates an existing NodeGroup's description or label selector.
+    ///
+    /// Traces to: [REQ-OP-001], [REQ-VER-002]
+    async fn update_node_group(
+        &self,
+        request: Request<UpdateNodeGroupRequest>,
+    ) -> Result<Response<UpdateNodeGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let res = self
+            .scheduler
+            .update_node_group(req, Self::current_epoch_ms())?;
+        Ok(Response::new(res))
+    }
+
+    /// Lists all registered NodeGroups.
+    ///
+    /// Traces to: [REQ-OP-001], [NFR-PERF-001]
+    async fn list_node_groups(
+        &self,
+        request: Request<ListNodeGroupsRequest>,
+    ) -> Result<Response<ListNodeGroupsResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let groups = self.scheduler.list_node_groups();
+        Ok(Response::new(ListNodeGroupsResponse { groups }))
+    }
+
+    /// Explicitly assigns or unassigns worker nodes to a NodeGroup.
+    ///
+    /// Traces to: [REQ-OP-001], [NFR-REL-001]
+    async fn assign_nodes_to_group(
+        &self,
+        request: Request<AssignNodesToGroupRequest>,
+    ) -> Result<Response<AssignNodesToGroupResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let res = self
+            .scheduler
+            .assign_nodes_to_group(req, Self::current_epoch_ms())?;
+        Ok(Response::new(res))
+    }
+
+    /// Drains or undrains targeted worker nodes.
+    ///
+    /// Traces to: [REQ-OP-002], [REQ-OP-003], [NFR-REL-001]
+    async fn drain_nodes(
+        &self,
+        request: Request<DrainNodesRequest>,
+    ) -> Result<Response<DrainNodesResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let res = self.scheduler.drain_nodes(req)?;
+        Ok(Response::new(res))
+    }
+
+    /// Signals a target client version upgrade to targeted worker nodes.
+    ///
+    /// Traces to: [REQ-OP-002], [INV-003], [NFR-POW-001]
+    async fn upgrade_nodes(
+        &self,
+        request: Request<UpgradeNodesRequest>,
+    ) -> Result<Response<UpgradeNodesResponse>, Status> {
+        Self::authorize_admin_peer(&request)?;
+        let req = request.into_inner();
+        let res = self.scheduler.upgrade_nodes(req)?;
+        Ok(Response::new(res))
+    }
 }
 
 #[cfg(test)]
@@ -520,6 +607,7 @@ mod tests {
             artifact_url: String::new(),
             group_id: String::new(),
             group_epoch: 0,
+            node_group_affinity: String::new(),
         }
     }
 
@@ -900,6 +988,7 @@ mod tests {
                     artifact_sha256: sha.clone(),
                     shell_command: String::new(),
                     requires_unmetered: false,
+                    node_group_affinity: String::new(),
                 }),
                 partitions: vec![TaskPartitionSpec::default()],
             }),
@@ -928,6 +1017,7 @@ mod tests {
                     artifact_sha256: sha,
                     shell_command: String::new(),
                     requires_unmetered: false,
+                    node_group_affinity: String::new(),
                 }),
                 partitions: vec![TaskPartitionSpec::default(), TaskPartitionSpec::default()],
                 strategy: ReplaceStrategy::Immediate as i32,
@@ -937,5 +1027,58 @@ mod tests {
             .into_inner();
         assert_eq!(rep_res.new_epoch, 2);
         assert_eq!(rep_res.created_tasks, 2);
+    }
+
+    #[tokio::test]
+    async fn test_admin_service_node_group_and_fleet_ops_mtls() {
+        let scheduler = Arc::new(ClusterScheduler::new());
+        let svc = AdminServiceImpl::new(Arc::clone(&scheduler));
+
+        // Non-admin peer rejected
+        let mut worker_req = Request::new(CreateNodeGroupRequest {
+            group_id: "rack-1".to_string(),
+            description: String::new(),
+            label_selector: std::collections::HashMap::new(),
+            initial_node_ids: Vec::new(),
+        });
+        worker_req.extensions_mut().insert(AuthenticatedPeer {
+            common_name: Some("pixel-1".to_string()),
+            organizational_unit: Some("Edge Compute".to_string()),
+            not_before_epoch_secs: 0,
+            not_after_epoch_secs: i64::MAX,
+            leaf_fingerprint_sha256: [0u8; 32],
+            spki_der: Vec::new(),
+        });
+        let err = svc.create_node_group(worker_req).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+
+        // Admin peer creates group
+        let mut admin_req = Request::new(CreateNodeGroupRequest {
+            group_id: "rack-1".to_string(),
+            description: "Rack 1".to_string(),
+            label_selector: std::collections::HashMap::new(),
+            initial_node_ids: Vec::new(),
+        });
+        admin_req.extensions_mut().insert(AuthenticatedPeer {
+            common_name: Some("ops".to_string()),
+            organizational_unit: Some("Control Plane".to_string()),
+            not_before_epoch_secs: 0,
+            not_after_epoch_secs: i64::MAX,
+            leaf_fingerprint_sha256: [0u8; 32],
+            spki_der: Vec::new(),
+        });
+        let created = svc.create_node_group(admin_req).await.unwrap().into_inner();
+        assert!(created.created);
+
+        // SubmitTask with unknown node_group_affinity returns NOT_FOUND
+        let mut bad_task = make_test_task("t-missing-grp");
+        bad_task.node_group_affinity = "does-not-exist".to_string();
+        let task_err = svc
+            .submit_task(Request::new(SubmitTaskRequest {
+                task: Some(bad_task),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(task_err.code(), tonic::Code::NotFound);
     }
 }

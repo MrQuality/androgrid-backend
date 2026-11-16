@@ -60,6 +60,7 @@ async fn spike_concurrent_result_submissions_zero_double_commit() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -171,6 +172,7 @@ async fn spike_speculative_preemption_concurrent_race() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler.submit_task(spec).unwrap();
 
@@ -282,6 +284,7 @@ async fn test_concurrent_replace_task_group_cas_race() {
         artifact_sha256: "a".repeat(64),
         shell_command: String::new(),
         requires_unmetered: false,
+        node_group_affinity: String::new(),
     };
 
     scheduler

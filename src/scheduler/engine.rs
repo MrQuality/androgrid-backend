@@ -4,23 +4,39 @@
 //! [REQ-OP-001], [REQ-OP-002], [REQ-OP-003], [REQ-OP-004],
 //! [INV-004], [INV-005], [INV-006], [ANTI-003], [NFR-REL-001]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, RwLock};
 
 use crate::scheduler::errors::SchedulingError;
-use crate::scheduler::state::{TaskExecutionResult, TaskGroupRecord, TaskRecord, WorkerRecord};
+use crate::scheduler::state::{
+    NodeGroupRecord, TaskExecutionResult, TaskGroupRecord, TaskRecord, WorkerRecord,
+};
 use crate::scheduler::thermal::{ThermalAction, ThermalPolicy};
 use crate::{
-    CancelTaskGroupResponse, ClaimCellularTaskResponse, ExecutionEngine,
-    GetTaskGroupStatusResponse, NetworkTransportType, NodeCapabilities, RegisterNodeResponse,
-    ReplaceStrategy, ReplaceTaskGroupRequest, ReplaceTaskGroupResponse,
-    SubmitCellularResultResponse, SubmitTaskGroupResponse, SyncNodeStateResponse,
-    TaskExecutionReport, TaskGroupSpec, TaskGroupState, TaskGroupSummary, TaskPartitionSpec,
-    TaskSpec, TaskState, TaskTemplate,
+    AssignNodesToGroupRequest, AssignNodesToGroupResponse, CancelTaskGroupResponse,
+    ClaimCellularTaskResponse, CreateNodeGroupRequest, CreateNodeGroupResponse, DrainNodesRequest,
+    DrainNodesResponse, ExecutionEngine, GetTaskGroupStatusResponse, NetworkTransportType,
+    NodeCapabilities, NodeGroup, RegisterNodeResponse, ReplaceStrategy, ReplaceTaskGroupRequest,
+    ReplaceTaskGroupResponse, SubmitCellularResultResponse, SubmitTaskGroupResponse,
+    SyncNodeStateResponse, TaskExecutionReport, TaskGroupSpec, TaskGroupState, TaskGroupSummary,
+    TaskPartitionSpec, TaskSpec, TaskState, TaskTemplate, UpdateNodeGroupRequest,
+    UpdateNodeGroupResponse, UpgradeNodesRequest, UpgradeNodesResponse,
 };
 
 /// Maximum number of partitions allowed in a single TaskGroup submission or replacement.
 pub const MAX_GROUP_PARTITIONS: usize = 1000;
+
+/// Maximum number of NodeGroups allowed in the cluster registry.
+/// Traces to: [REQ-OP-001], [NFR-PERF-001]
+pub const MAX_NODE_GROUPS: usize = 256;
+
+/// Maximum number of labels or selector entries per worker or NodeGroup.
+/// Traces to: [REQ-OP-001], [NFR-PERF-001]
+pub const MAX_GROUP_LABELS: usize = 32;
+
+/// Maximum number of node IDs accepted in a single batch assignment/drain/upgrade call.
+/// Traces to: [REQ-OP-001], [NFR-PERF-001]
+pub const MAX_ASSIGN_NODES_BATCH: usize = 1000;
 
 /// Default maximum allowable task duration on cellular spot connections (180 seconds).
 /// Traces to: [INV-005], [ANTI-003]
@@ -54,6 +70,7 @@ struct SchedulerInner {
     tasks: HashMap<String, TaskRecord>,
     workers: HashMap<String, WorkerRecord>,
     groups: HashMap<String, TaskGroupRecord>,
+    node_groups: HashMap<String, NodeGroupRecord>,
     pending_cancellations: HashMap<String, Vec<String>>,
     allow_insecure_root_tasks: bool,
     thermal_policy: ThermalPolicy,
@@ -75,6 +92,7 @@ impl ClusterScheduler {
                 tasks: HashMap::new(),
                 workers: HashMap::new(),
                 groups: HashMap::new(),
+                node_groups: HashMap::new(),
                 pending_cancellations: HashMap::new(),
                 allow_insecure_root_tasks,
                 thermal_policy,
@@ -123,16 +141,38 @@ impl ClusterScheduler {
         inner.thermal_policy = policy;
     }
 
-    /// Registers an Android worker node, enforcing root capabilities and engine boundaries.
+    /// Registers an Android worker node without custom labels.
     ///
     /// Traces to: [REQ-OP-001], [INV-006], [REQ-VER-002]
     pub fn register_node(
         &self,
         node_id: String,
-        mut capabilities: NodeCapabilities,
+        capabilities: NodeCapabilities,
         client_version: String,
         now_epoch_ms: u64,
     ) -> Result<RegisterNodeResponse, SchedulingError> {
+        self.register_node_with_labels(
+            node_id,
+            capabilities,
+            client_version,
+            HashMap::new(),
+            now_epoch_ms,
+        )
+    }
+
+    /// Registers an Android worker node with operator/device labels, enforcing root capabilities
+    /// and preserving control-plane group/drain/upgrade state across reconnections.
+    ///
+    /// Traces to: [REQ-OP-001], [INV-006], [REQ-VER-002]
+    pub fn register_node_with_labels(
+        &self,
+        node_id: String,
+        mut capabilities: NodeCapabilities,
+        client_version: String,
+        labels: HashMap<String, String>,
+        now_epoch_ms: u64,
+    ) -> Result<RegisterNodeResponse, SchedulingError> {
+        let validated_labels = validate_labels(&labels, false)?;
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
         // Enforce [INV-006]: If device is unrooted, filter supported engines to exclude RootShell
@@ -155,6 +195,28 @@ impl ClusterScheduler {
         let battery_temperature_celsius = capabilities.battery_temperature_celsius;
         let thermal_status = capabilities.thermal_status;
 
+        let (explicit_node_group, draining, active_task_ids, desired_client_version) =
+            if let Some(existing) = inner.workers.get(&node_id) {
+                let next_desired = match existing.desired_client_version.as_deref() {
+                    Some(target) if target == client_version => None,
+                    Some(target) => Some(target.to_string()),
+                    None => None,
+                };
+                (
+                    existing.explicit_node_group.clone(),
+                    existing.draining,
+                    existing.active_task_ids.clone(),
+                    next_desired,
+                )
+            } else {
+                let pre_pinned = inner
+                    .node_groups
+                    .iter()
+                    .find(|(_, grp)| grp.member_node_ids.contains(&node_id))
+                    .map(|(gid, _)| gid.clone());
+                (pre_pinned, false, Vec::new(), None)
+            };
+
         let worker = WorkerRecord {
             node_id: node_id.clone(),
             capabilities,
@@ -165,7 +227,11 @@ impl ClusterScheduler {
             battery_temperature_celsius,
             thermal_status,
             last_seen_epoch_ms: now_epoch_ms,
-            active_task_ids: Vec::new(),
+            active_task_ids,
+            labels: validated_labels,
+            explicit_node_group,
+            draining,
+            desired_client_version,
         };
 
         let transport_str = if worker.capabilities.current_transport
@@ -216,6 +282,13 @@ impl ClusterScheduler {
                 task_id
             )));
         }
+        if !spec.node_group_affinity.is_empty()
+            && !inner.node_groups.contains_key(&spec.node_group_affinity)
+        {
+            return Err(SchedulingError::NodeGroupNotFound(
+                spec.node_group_affinity.clone(),
+            ));
+        }
         let engine_str = match spec.engine {
             1 => "WasmWasi",
             2 => "RootShell",
@@ -249,7 +322,7 @@ impl ClusterScheduler {
     ) -> Result<ClaimCellularTaskResponse, SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
-        let (is_rooted, policy, allow_root) = {
+        let (is_rooted, policy, allow_root, worker_snapshot) = {
             let worker = inner
                 .workers
                 .get_mut(node_id)
@@ -269,11 +342,24 @@ impl ClusterScheduler {
             worker.thermal_status = thermal_status;
             worker.capabilities.battery_temperature_celsius = battery_temperature_celsius;
             worker.capabilities.thermal_status = thermal_status;
+            worker.capabilities.current_transport =
+                NetworkTransportType::NetworkTransportCellularWan as i32;
+            worker.capabilities.is_metered = true;
 
+            if worker.draining {
+                return Ok(ClaimCellularTaskResponse {
+                    task_available: false,
+                    task: None,
+                    deadline_epoch_seconds: 0,
+                });
+            }
+
+            let worker_snap = worker.clone();
             (
-                worker.capabilities.is_rooted,
+                worker_snap.capabilities.is_rooted,
                 inner.thermal_policy,
                 inner.allow_insecure_root_tasks,
+                worker_snap,
             )
         };
 
@@ -319,6 +405,16 @@ impl ClusterScheduler {
             // 2. Root tasks require explicit cluster flag allow_insecure_root_tasks
             if record.spec.engine == ExecutionEngine::RootShell as i32
                 && (!is_rooted || !allow_root)
+            {
+                continue;
+            }
+
+            if !record.spec.node_group_affinity.is_empty()
+                && !is_worker_in_node_group(
+                    &inner.node_groups,
+                    &worker_snapshot,
+                    &record.spec.node_group_affinity,
+                )
             {
                 continue;
             }
@@ -393,7 +489,15 @@ impl ClusterScheduler {
     ) -> Result<SyncNodeStateResponse, SchedulingError> {
         let mut inner = self.inner.write().expect("RwLock write lock poisoned");
 
-        let (is_rooted, is_unmetered, is_throttled, allow_root) = {
+        let (
+            is_rooted,
+            is_unmetered,
+            is_throttled,
+            allow_root,
+            is_draining,
+            desired_version,
+            worker_snapshot,
+        ) = {
             let policy = inner.thermal_policy;
             let allow_root = inner.allow_insecure_root_tasks;
             let worker = inner
@@ -416,12 +520,19 @@ impl ClusterScheduler {
             let unmetered = !worker.capabilities.is_metered
                 || worker.capabilities.current_transport
                     == NetworkTransportType::NetworkTransportWifiLan as i32;
+            let desired_version = match worker.desired_client_version.as_deref() {
+                Some(target) if target != worker.client_version => target.to_string(),
+                _ => String::new(),
+            };
 
             (
                 worker.capabilities.is_rooted,
                 unmetered,
                 throttled,
                 allow_root,
+                worker.draining,
+                desired_version,
+                worker.clone(),
             )
         };
 
@@ -484,15 +595,25 @@ impl ClusterScheduler {
             }
         }
 
-        // Schedule new or preempted tasks for this Wi-Fi node (deferred if thermally throttled)
+        // Schedule new or preempted tasks for this Wi-Fi node (deferred if thermally throttled or draining)
         let mut desired_tasks = Vec::new();
+        let inner_ref = &mut *inner;
 
-        if is_unmetered && !is_throttled {
+        if is_unmetered && !is_throttled && !is_draining {
             // First priority: dispatch any pending unassigned tasks
-            for record in inner.tasks.values_mut() {
+            for record in inner_ref.tasks.values_mut() {
                 if record.state == TaskState::Pending {
                     if record.spec.engine == ExecutionEngine::RootShell as i32
                         && (!is_rooted || !allow_root)
+                    {
+                        continue;
+                    }
+                    if !record.spec.node_group_affinity.is_empty()
+                        && !is_worker_in_node_group(
+                            &inner_ref.node_groups,
+                            &worker_snapshot,
+                            &record.spec.node_group_affinity,
+                        )
                     {
                         continue;
                     }
@@ -515,12 +636,21 @@ impl ClusterScheduler {
             // Second priority: [INV-005] Speculative Dual-Assignment
             // If Wi-Fi worker has capacity, preempt slow cellular spot worker
             if desired_tasks.is_empty() {
-                for record in inner.tasks.values_mut() {
+                for record in inner_ref.tasks.values_mut() {
                     if record.state == TaskState::Leased
                         && record.assigned_node_id.as_deref() != Some(node_id)
                     {
                         if record.spec.engine == ExecutionEngine::RootShell as i32
                             && (!is_rooted || !allow_root)
+                        {
+                            continue;
+                        }
+                        if !record.spec.node_group_affinity.is_empty()
+                            && !is_worker_in_node_group(
+                                &inner_ref.node_groups,
+                                &worker_snapshot,
+                                &record.spec.node_group_affinity,
+                            )
                         {
                             continue;
                         }
@@ -566,6 +696,7 @@ impl ClusterScheduler {
             desired_tasks,
             cancel_task_ids,
             acknowledged_task_ids: acknowledged_ids,
+            desired_client_version: desired_version,
         })
     }
 
@@ -736,11 +867,25 @@ impl ClusterScheduler {
         inner
             .workers
             .iter()
-            .map(|(node_id, worker)| crate::WorkerNodeInfo {
-                node_id: node_id.clone(),
-                capabilities: Some(worker.capabilities.clone()),
-                client_version: worker.client_version.clone(),
-                last_heartbeat_epoch_seconds: worker.last_seen_epoch_ms / 1000,
+            .map(|(node_id, worker)| {
+                let effective_labels: HashMap<String, String> =
+                    worker.effective_labels().into_iter().collect();
+                let node_group =
+                    resolve_effective_node_group(&inner.node_groups, worker).unwrap_or_default();
+                let desired_client_version = match worker.desired_client_version.as_deref() {
+                    Some(target) if target != worker.client_version => target.to_string(),
+                    _ => String::new(),
+                };
+                crate::WorkerNodeInfo {
+                    node_id: node_id.clone(),
+                    capabilities: Some(worker.capabilities.clone()),
+                    client_version: worker.client_version.clone(),
+                    last_heartbeat_epoch_seconds: worker.last_seen_epoch_ms / 1000,
+                    labels: effective_labels,
+                    node_group,
+                    draining: worker.draining,
+                    desired_client_version,
+                }
             })
             .collect()
     }
@@ -788,6 +933,7 @@ impl ClusterScheduler {
                     execution_duration_ms,
                     error_message: error_message.unwrap_or_default(),
                     speculative_node_id: task.speculative_node_id.clone().unwrap_or_default(),
+                    node_group_affinity: task.spec.node_group_affinity.clone(),
                 }
             })
             .collect()
@@ -1038,8 +1184,26 @@ impl ClusterScheduler {
         {
             return Err(SchedulingError::RootShellExecutionDisabled);
         }
+        if !template.node_group_affinity.is_empty()
+            && !inner
+                .node_groups
+                .contains_key(&template.node_group_affinity)
+        {
+            return Err(SchedulingError::NodeGroupNotFound(
+                template.node_group_affinity.clone(),
+            ));
+        }
         if inner.groups.contains_key(&group.group_id) {
             return Err(SchedulingError::GroupAlreadyExists(group.group_id));
+        }
+        if !template.node_group_affinity.is_empty()
+            && !inner
+                .node_groups
+                .contains_key(&template.node_group_affinity)
+        {
+            return Err(SchedulingError::NodeGroupNotFound(
+                template.node_group_affinity.clone(),
+            ));
         }
 
         let epoch = 1u64;
@@ -1108,6 +1272,15 @@ impl ClusterScheduler {
         if template.engine == ExecutionEngine::RootShell as i32 && !inner.allow_insecure_root_tasks
         {
             return Err(SchedulingError::RootShellExecutionDisabled);
+        }
+        if !template.node_group_affinity.is_empty()
+            && !inner
+                .node_groups
+                .contains_key(&template.node_group_affinity)
+        {
+            return Err(SchedulingError::NodeGroupNotFound(
+                template.node_group_affinity.clone(),
+            ));
         }
 
         let (current_epoch, current_state, prev_current_ids, prev_draining_ids) = {
@@ -1420,6 +1593,293 @@ impl ClusterScheduler {
         summaries.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         summaries
     }
+
+    /// Creates a new logical NodeGroup for fleet partitioning and targeted operations.
+    ///
+    /// Traces to: [REQ-OP-001], [INV-005], [INV-006], [REQ-VER-002], [NFR-REL-001]
+    pub fn create_node_group(
+        &self,
+        req: CreateNodeGroupRequest,
+        now_epoch_ms: u64,
+    ) -> Result<CreateNodeGroupResponse, SchedulingError> {
+        validate_group_id(&req.group_id)?;
+        let selector = validate_labels(&req.label_selector, true)?;
+        let initial_nodes = validate_node_id_batch(&req.initial_node_ids, true)?;
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        if inner.node_groups.contains_key(&req.group_id) {
+            return Err(SchedulingError::NodeGroupAlreadyExists(req.group_id));
+        }
+        if inner.node_groups.len() >= MAX_NODE_GROUPS {
+            return Err(SchedulingError::NodeGroupLimitExceeded(MAX_NODE_GROUPS));
+        }
+
+        let mut member_set = BTreeSet::new();
+        for nid in &initial_nodes {
+            // Atomically move from any prior explicit group
+            for (prior_gid, prior_grp) in inner.node_groups.iter_mut() {
+                if prior_gid != &req.group_id && prior_grp.member_node_ids.remove(nid) {
+                    prior_grp.updated_at_epoch_ms = now_epoch_ms;
+                }
+            }
+            if let Some(worker) = inner.workers.get_mut(nid) {
+                worker.explicit_node_group = Some(req.group_id.clone());
+            }
+            member_set.insert(nid.clone());
+        }
+
+        let record = NodeGroupRecord {
+            group_id: req.group_id.clone(),
+            description: req.description,
+            label_selector: selector,
+            member_node_ids: member_set,
+            created_at_epoch_ms: now_epoch_ms,
+            updated_at_epoch_ms: now_epoch_ms,
+        };
+        let proto_group = build_node_group_proto(&record, &inner.node_groups, &inner.workers);
+        inner.node_groups.insert(req.group_id.clone(), record);
+
+        Ok(CreateNodeGroupResponse {
+            created: true,
+            group: Some(proto_group),
+            message: format!("NodeGroup '{}' created", req.group_id),
+        })
+    }
+
+    /// Updates a NodeGroup's description and/or label selector.
+    ///
+    /// Traces to: [REQ-OP-001], [REQ-VER-002], [NFR-REL-001]
+    pub fn update_node_group(
+        &self,
+        req: UpdateNodeGroupRequest,
+        now_epoch_ms: u64,
+    ) -> Result<UpdateNodeGroupResponse, SchedulingError> {
+        validate_group_id(&req.group_id)?;
+        if !req.replace_label_selector && !req.label_selector.is_empty() {
+            return Err(SchedulingError::InvalidNodeGroupRequest(
+                "label_selector must be empty when replace_label_selector is false".to_string(),
+            ));
+        }
+        let next_selector = if req.replace_label_selector {
+            Some(validate_labels(&req.label_selector, true)?)
+        } else {
+            None
+        };
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        let mut changed = false;
+        {
+            let group = inner
+                .node_groups
+                .get_mut(&req.group_id)
+                .ok_or_else(|| SchedulingError::NodeGroupNotFound(req.group_id.clone()))?;
+            if let Some(desc) = req.description {
+                if group.description != desc {
+                    group.description = desc;
+                    changed = true;
+                }
+            }
+            if let Some(sel) = next_selector {
+                if group.label_selector != sel {
+                    group.label_selector = sel;
+                    changed = true;
+                }
+            }
+            if changed {
+                group.updated_at_epoch_ms = now_epoch_ms;
+            }
+        }
+
+        let record = inner
+            .node_groups
+            .get(&req.group_id)
+            .expect("verified above");
+        let proto_group = build_node_group_proto(record, &inner.node_groups, &inner.workers);
+        Ok(UpdateNodeGroupResponse {
+            updated: true,
+            group: Some(proto_group),
+            message: format!("NodeGroup '{}' updated", req.group_id),
+        })
+    }
+
+    /// Lists all registered NodeGroups sorted by group_id.
+    ///
+    /// Traces to: [REQ-OP-001], [NFR-PERF-001]
+    pub fn list_node_groups(&self) -> Vec<NodeGroup> {
+        let inner = self.inner.read().expect("RwLock read lock poisoned");
+        let mut out: Vec<NodeGroup> = inner
+            .node_groups
+            .values()
+            .map(|rec| build_node_group_proto(rec, &inner.node_groups, &inner.workers))
+            .collect();
+        out.sort_by(|a, b| a.group_id.cmp(&b.group_id));
+        out
+    }
+
+    /// Atomically assigns or unassigns worker node IDs to/from a NodeGroup.
+    ///
+    /// Traces to: [REQ-OP-001], [NFR-REL-001]
+    pub fn assign_nodes_to_group(
+        &self,
+        req: AssignNodesToGroupRequest,
+        now_epoch_ms: u64,
+    ) -> Result<AssignNodesToGroupResponse, SchedulingError> {
+        validate_group_id(&req.group_id)?;
+        let node_ids = validate_node_id_batch(&req.node_ids, false)?;
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        if !inner.node_groups.contains_key(&req.group_id) {
+            return Err(SchedulingError::NodeGroupNotFound(req.group_id));
+        }
+
+        let mut affected = 0u32;
+        if req.unassign {
+            for nid in &node_ids {
+                let removed_from_grp = inner
+                    .node_groups
+                    .get_mut(&req.group_id)
+                    .map(|g| g.member_node_ids.remove(nid))
+                    .unwrap_or(false);
+                let cleared_worker = if let Some(w) = inner.workers.get_mut(nid) {
+                    if w.explicit_node_group.as_deref() == Some(&req.group_id) {
+                        w.explicit_node_group = None;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if removed_from_grp || cleared_worker {
+                    affected += 1;
+                }
+            }
+            if affected > 0 {
+                if let Some(g) = inner.node_groups.get_mut(&req.group_id) {
+                    g.updated_at_epoch_ms = now_epoch_ms;
+                }
+            }
+        } else {
+            for nid in &node_ids {
+                for (prior_gid, prior_grp) in inner.node_groups.iter_mut() {
+                    if prior_gid != &req.group_id && prior_grp.member_node_ids.remove(nid) {
+                        prior_grp.updated_at_epoch_ms = now_epoch_ms;
+                    }
+                }
+                let inserted = inner
+                    .node_groups
+                    .get_mut(&req.group_id)
+                    .map(|g| g.member_node_ids.insert(nid.clone()))
+                    .unwrap_or(false);
+                let worker_changed = if let Some(w) = inner.workers.get_mut(nid) {
+                    if w.explicit_node_group.as_deref() != Some(&req.group_id) {
+                        w.explicit_node_group = Some(req.group_id.clone());
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if inserted || worker_changed {
+                    affected += 1;
+                }
+            }
+            if affected > 0 {
+                if let Some(g) = inner.node_groups.get_mut(&req.group_id) {
+                    g.updated_at_epoch_ms = now_epoch_ms;
+                }
+            }
+        }
+
+        let record = inner
+            .node_groups
+            .get(&req.group_id)
+            .expect("verified above");
+        let proto_group = build_node_group_proto(record, &inner.node_groups, &inner.workers);
+        Ok(AssignNodesToGroupResponse {
+            success: true,
+            group_id: req.group_id.clone(),
+            affected_nodes: affected,
+            group: Some(proto_group),
+            message: if req.unassign {
+                format!("Unassigned {} node(s) from '{}'", affected, req.group_id)
+            } else {
+                format!("Assigned {} node(s) to '{}'", affected, req.group_id)
+            },
+        })
+    }
+
+    /// Drains or undrains targeted worker nodes by NodeGroup or explicit node IDs.
+    ///
+    /// Traces to: [REQ-OP-002], [REQ-OP-003], [NFR-REL-001]
+    pub fn drain_nodes(
+        &self,
+        req: DrainNodesRequest,
+    ) -> Result<DrainNodesResponse, SchedulingError> {
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        let target_ids = resolve_target_node_ids(&inner, &req.node_group, &req.node_ids)?;
+
+        for nid in &target_ids {
+            if let Some(w) = inner.workers.get_mut(nid) {
+                w.draining = req.drain;
+            }
+        }
+
+        let count = target_ids.len() as u32;
+        let action = if req.drain { "Drained" } else { "Undrained" };
+        Ok(DrainNodesResponse {
+            success: true,
+            affected_nodes: count,
+            affected_node_ids: target_ids,
+            message: format!("{} {} worker node(s)", action, count),
+        })
+    }
+
+    /// Signals a target client version upgrade to targeted worker nodes (excluding nodes
+    /// already running `target_version`).
+    ///
+    /// Traces to: [REQ-OP-002], [INV-003], [NFR-POW-001], [NFR-REL-001]
+    pub fn upgrade_nodes(
+        &self,
+        req: UpgradeNodesRequest,
+    ) -> Result<UpgradeNodesResponse, SchedulingError> {
+        let target_version = req.target_version.trim().to_string();
+        if target_version.is_empty() {
+            return Err(SchedulingError::InvalidNodeGroupRequest(
+                "target_version must not be empty".to_string(),
+            ));
+        }
+
+        let mut inner = self.inner.write().expect("RwLock write lock poisoned");
+        let candidate_ids = resolve_target_node_ids(&inner, &req.node_group, &req.node_ids)?;
+
+        let mut targeted = Vec::new();
+        for nid in candidate_ids {
+            if let Some(w) = inner.workers.get_mut(&nid) {
+                if w.client_version == target_version {
+                    continue;
+                }
+                w.desired_client_version = Some(target_version.clone());
+                if req.drain_before_upgrade {
+                    w.draining = true;
+                }
+                targeted.push(nid);
+            }
+        }
+
+        let count = targeted.len() as u32;
+        Ok(UpgradeNodesResponse {
+            success: true,
+            targeted_nodes: count,
+            targeted_node_ids: targeted,
+            target_version: target_version.clone(),
+            message: format!(
+                "Signaled upgrade to '{}' for {} worker node(s)",
+                target_version, count
+            ),
+        })
+    }
 }
 
 fn is_terminal_task_state(state: TaskState) -> bool {
@@ -1529,6 +1989,7 @@ fn build_partition_task_record(
         artifact_url: String::new(),
         group_id: group_id.to_string(),
         group_epoch: epoch,
+        node_group_affinity: template.node_group_affinity.clone(),
     })
 }
 
@@ -1629,6 +2090,196 @@ fn task_record_to_info(record: &TaskRecord) -> crate::TaskInfo {
         execution_duration_ms: duration_ms,
         error_message,
         speculative_node_id: record.speculative_node_id.clone().unwrap_or_default(),
+        node_group_affinity: record.spec.node_group_affinity.clone(),
+    }
+}
+
+fn validate_labels(
+    labels: &HashMap<String, String>,
+    allow_reserved_prefix: bool,
+) -> Result<BTreeMap<String, String>, SchedulingError> {
+    if labels.len() > MAX_GROUP_LABELS {
+        return Err(SchedulingError::InvalidNodeLabels(format!(
+            "label count {} exceeds MAX_GROUP_LABELS ({})",
+            labels.len(),
+            MAX_GROUP_LABELS
+        )));
+    }
+    let mut out = BTreeMap::new();
+    for (k, v) in labels {
+        if k.is_empty()
+            || k.len() > 128
+            || !k
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'/' | b'-'))
+        {
+            return Err(SchedulingError::InvalidNodeLabels(format!(
+                "invalid label key '{}': must match ^[a-zA-Z0-9_./-]{{1,128}}$",
+                k
+            )));
+        }
+        if !allow_reserved_prefix && k.starts_with("androgrid.io/") {
+            return Err(SchedulingError::InvalidNodeLabels(format!(
+                "label key '{}' uses reserved 'androgrid.io/' prefix",
+                k
+            )));
+        }
+        if v.is_empty() || v.len() > 128 || !v.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
+            return Err(SchedulingError::InvalidNodeLabels(format!(
+                "invalid label value for key '{}': must be 1..=128 printable non-whitespace ASCII chars",
+                k
+            )));
+        }
+        out.insert(k.clone(), v.clone());
+    }
+    Ok(out)
+}
+
+fn validate_node_id_batch(
+    node_ids: &[String],
+    allow_empty: bool,
+) -> Result<Vec<String>, SchedulingError> {
+    if !allow_empty && node_ids.is_empty() {
+        return Err(SchedulingError::InvalidNodeGroupRequest(
+            "node_ids must not be empty".to_string(),
+        ));
+    }
+    if node_ids.len() > MAX_ASSIGN_NODES_BATCH {
+        return Err(SchedulingError::InvalidNodeGroupRequest(format!(
+            "node_ids count {} exceeds MAX_ASSIGN_NODES_BATCH ({})",
+            node_ids.len(),
+            MAX_ASSIGN_NODES_BATCH
+        )));
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::with_capacity(node_ids.len());
+    for nid in node_ids {
+        if nid.trim().is_empty() {
+            return Err(SchedulingError::InvalidNodeGroupRequest(
+                "node_ids must not contain empty elements".to_string(),
+            ));
+        }
+        if seen.insert(nid.clone()) {
+            out.push(nid.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn is_worker_in_node_group(
+    node_groups: &HashMap<String, NodeGroupRecord>,
+    worker: &WorkerRecord,
+    group_id: &str,
+) -> bool {
+    if let Some(ref explicit) = worker.explicit_node_group {
+        return explicit == group_id;
+    }
+    let Some(group) = node_groups.get(group_id) else {
+        return false;
+    };
+    if group.label_selector.is_empty() {
+        return false;
+    }
+    let effective = worker.effective_labels();
+    group
+        .label_selector
+        .iter()
+        .all(|(k, v)| effective.get(k) == Some(v))
+}
+
+fn resolve_effective_node_group(
+    node_groups: &HashMap<String, NodeGroupRecord>,
+    worker: &WorkerRecord,
+) -> Option<String> {
+    if let Some(ref explicit) = worker.explicit_node_group {
+        return Some(explicit.clone());
+    }
+    let effective = worker.effective_labels();
+    let mut matches: Vec<&str> = node_groups
+        .values()
+        .filter(|g| {
+            !g.label_selector.is_empty()
+                && g.label_selector
+                    .iter()
+                    .all(|(k, v)| effective.get(k) == Some(v))
+        })
+        .map(|g| g.group_id.as_str())
+        .collect();
+    matches.sort_unstable();
+    matches.first().map(|s| (*s).to_string())
+}
+
+fn build_node_group_proto(
+    record: &NodeGroupRecord,
+    all_groups: &HashMap<String, NodeGroupRecord>,
+    workers: &HashMap<String, WorkerRecord>,
+) -> NodeGroup {
+    let active_node_count = workers
+        .values()
+        .filter(|w| {
+            if let Some(ref explicit) = w.explicit_node_group {
+                explicit == &record.group_id
+            } else if !record.label_selector.is_empty() {
+                let effective = w.effective_labels();
+                record
+                    .label_selector
+                    .iter()
+                    .all(|(k, v)| effective.get(k) == Some(v))
+            } else {
+                let _ = all_groups;
+                false
+            }
+        })
+        .count() as u32;
+    NodeGroup {
+        group_id: record.group_id.clone(),
+        description: record.description.clone(),
+        label_selector: record
+            .label_selector
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        member_node_ids: record.member_node_ids.iter().cloned().collect(),
+        active_node_count,
+        created_at_epoch_ms: record.created_at_epoch_ms,
+        updated_at_epoch_ms: record.updated_at_epoch_ms,
+    }
+}
+
+fn resolve_target_node_ids(
+    inner: &SchedulerInner,
+    node_group: &str,
+    node_ids: &[String],
+) -> Result<Vec<String>, SchedulingError> {
+    let has_group = !node_group.is_empty();
+    let has_nodes = !node_ids.is_empty();
+    if has_group == has_nodes {
+        return Err(SchedulingError::InvalidNodeGroupRequest(
+            "exactly one of node_group or node_ids must be provided".to_string(),
+        ));
+    }
+
+    if has_group {
+        validate_group_id(node_group)?;
+        if !inner.node_groups.contains_key(node_group) {
+            return Err(SchedulingError::NodeGroupNotFound(node_group.to_string()));
+        }
+        let mut matched: Vec<String> = inner
+            .workers
+            .iter()
+            .filter(|(_, w)| is_worker_in_node_group(&inner.node_groups, w, node_group))
+            .map(|(nid, _)| nid.clone())
+            .collect();
+        matched.sort();
+        Ok(matched)
+    } else {
+        let deduped = validate_node_id_batch(node_ids, false)?;
+        for nid in &deduped {
+            if !inner.workers.contains_key(nid) {
+                return Err(SchedulingError::NodeNotFound(nid.clone()));
+            }
+        }
+        Ok(deduped)
     }
 }
 
@@ -1681,6 +2332,7 @@ mod tests {
             artifact_url: String::new(),
             group_id: String::new(),
             group_epoch: 0,
+            node_group_affinity: String::new(),
         }
     }
 
@@ -2108,6 +2760,7 @@ mod tests {
             artifact_sha256: sha.to_string(),
             shell_command: String::new(),
             requires_unmetered: false,
+            node_group_affinity: String::new(),
         }
     }
 
@@ -2668,5 +3321,430 @@ mod tests {
             ),
             Err(SchedulingError::GroupTerminal(_))
         ));
+    }
+
+    #[test]
+    fn test_node_group_create_update_list_and_validation() {
+        let scheduler = ClusterScheduler::new();
+
+        // Invalid group_id
+        assert!(matches!(
+            scheduler.create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "bad group!".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            ),
+            Err(SchedulingError::InvalidGroupId(_))
+        ));
+
+        // Reserved prefix rejected on RegisterNode, allowed in NodeGroup selector
+        assert!(matches!(
+            scheduler.register_node_with_labels(
+                "n1".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                HashMap::from([("androgrid.io/rooted".to_string(), "true".to_string())]),
+                1000,
+            ),
+            Err(SchedulingError::InvalidNodeLabels(_))
+        ));
+
+        let created = scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "rack-01".to_string(),
+                    description: "Rack 1".to_string(),
+                    label_selector: HashMap::from([
+                        ("rack".to_string(), "rig-01".to_string()),
+                        ("androgrid.io/rooted".to_string(), "true".to_string()),
+                    ]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+        assert!(created.created);
+        assert_eq!(created.group.as_ref().unwrap().group_id, "rack-01");
+
+        // Duplicate group_id
+        assert!(matches!(
+            scheduler.create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "rack-01".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: Vec::new(),
+                },
+                1100,
+            ),
+            Err(SchedulingError::NodeGroupAlreadyExists(_))
+        ));
+
+        // Update with replace_label_selector == false and non-empty selector fails
+        assert!(matches!(
+            scheduler.update_node_group(
+                UpdateNodeGroupRequest {
+                    group_id: "rack-01".to_string(),
+                    description: None,
+                    label_selector: HashMap::from([("rack".to_string(), "rig-02".to_string())]),
+                    replace_label_selector: false,
+                },
+                1200,
+            ),
+            Err(SchedulingError::InvalidNodeGroupRequest(_))
+        ));
+
+        // Update with replace_label_selector == true succeeds
+        let updated = scheduler
+            .update_node_group(
+                UpdateNodeGroupRequest {
+                    group_id: "rack-01".to_string(),
+                    description: Some("Updated Rack 1".to_string()),
+                    label_selector: HashMap::from([("rack".to_string(), "rig-02".to_string())]),
+                    replace_label_selector: true,
+                },
+                1300,
+            )
+            .unwrap();
+        let grp = updated.group.unwrap();
+        assert_eq!(grp.description, "Updated Rack 1");
+        assert_eq!(
+            grp.label_selector.get("rack").map(String::as_str),
+            Some("rig-02")
+        );
+        assert_eq!(grp.updated_at_epoch_ms, 1300);
+        assert_eq!(scheduler.list_node_groups().len(), 1);
+    }
+
+    #[test]
+    fn test_node_group_explicit_partitioning_and_reregistration_preservation() {
+        let scheduler = ClusterScheduler::new();
+
+        // Pre-register node-1 in group-a before it connects
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "group-a".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: vec!["node-1".to_string()],
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "group-b".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .register_node(
+                "node-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1100,
+            )
+            .unwrap();
+
+        let nodes = scheduler.list_worker_nodes();
+        assert_eq!(nodes[0].node_group, "group-a");
+
+        // Drain and signal upgrade on node-1
+        scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: "group-a".to_string(),
+                node_ids: Vec::new(),
+                target_version: "0.2.0".to_string(),
+                drain_before_upgrade: true,
+            })
+            .unwrap();
+
+        // Move node-1 from group-a to group-b atomically
+        let assign_res = scheduler
+            .assign_nodes_to_group(
+                AssignNodesToGroupRequest {
+                    group_id: "group-b".to_string(),
+                    node_ids: vec!["node-1".to_string()],
+                    unassign: false,
+                },
+                1200,
+            )
+            .unwrap();
+        assert_eq!(assign_res.affected_nodes, 1);
+
+        let groups = scheduler.list_node_groups();
+        assert!(groups[0].member_node_ids.is_empty());
+        assert_eq!(groups[0].updated_at_epoch_ms, 1200);
+        assert_eq!(groups[1].member_node_ids, vec!["node-1"]);
+
+        // Re-register with old version: preserves explicit_node_group, draining, and desired_client_version
+        scheduler
+            .register_node(
+                "node-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1300,
+            )
+            .unwrap();
+        let n1 = &scheduler.list_worker_nodes()[0];
+        assert_eq!(n1.node_group, "group-b");
+        assert!(n1.draining);
+        assert_eq!(n1.desired_client_version, "0.2.0");
+
+        // Re-register with target version 0.2.0: clears desired_client_version, preserves draining & group
+        scheduler
+            .register_node(
+                "node-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.2.0".to_string(),
+                1400,
+            )
+            .unwrap();
+        let n1_upgraded = &scheduler.list_worker_nodes()[0];
+        assert_eq!(n1_upgraded.node_group, "group-b");
+        assert!(n1_upgraded.draining);
+        assert_eq!(n1_upgraded.desired_client_version, "");
+
+        // Unassign idempotency
+        let unassign_res = scheduler
+            .assign_nodes_to_group(
+                AssignNodesToGroupRequest {
+                    group_id: "group-b".to_string(),
+                    node_ids: vec!["node-1".to_string(), "node-1".to_string()],
+                    unassign: true,
+                },
+                1500,
+            )
+            .unwrap();
+        assert_eq!(unassign_res.affected_nodes, 1);
+        let unassign_noop = scheduler
+            .assign_nodes_to_group(
+                AssignNodesToGroupRequest {
+                    group_id: "group-b".to_string(),
+                    node_ids: vec!["node-1".to_string()],
+                    unassign: true,
+                },
+                1600,
+            )
+            .unwrap();
+        assert_eq!(unassign_noop.affected_nodes, 0);
+    }
+
+    #[test]
+    fn test_node_group_affinity_and_preemption_isolation() {
+        let scheduler = ClusterScheduler::new();
+
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pool-a".to_string(),
+                    description: "Pool A".to_string(),
+                    label_selector: HashMap::from([
+                        ("pool".to_string(), "alpha".to_string()),
+                        ("androgrid.io/transport".to_string(), "cellular".to_string()),
+                    ]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pool-wifi-a".to_string(),
+                    description: "Wi-Fi Pool A".to_string(),
+                    label_selector: HashMap::from([("pool".to_string(), "alpha".to_string())]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pool-b".to_string(),
+                    description: "Pool B".to_string(),
+                    label_selector: HashMap::from([("pool".to_string(), "beta".to_string())]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+
+        // Unknown affinity fails fast
+        let mut bad_task = make_test_task("t-bad", 60, false, ExecutionEngine::WasmWasi);
+        bad_task.node_group_affinity = "missing-pool".to_string();
+        assert!(matches!(
+            scheduler.submit_task(bad_task),
+            Err(SchedulingError::NodeGroupNotFound(_))
+        ));
+
+        // Register cellular node in alpha (starts as Wi-Fi in RegisterNode, switches to cellular on Claim)
+        let cell_reg = scheduler
+            .register_node_with_labels(
+                "cell-alpha".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                HashMap::from([("pool".to_string(), "alpha".to_string())]),
+                1000,
+            )
+            .unwrap();
+        let _ = cell_reg;
+
+        let wifi_beta = scheduler
+            .register_node_with_labels(
+                "wifi-beta".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                HashMap::from([("pool".to_string(), "beta".to_string())]),
+                1000,
+            )
+            .unwrap();
+        let wifi_alpha = scheduler
+            .register_node_with_labels(
+                "wifi-alpha".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                HashMap::from([("pool".to_string(), "alpha".to_string())]),
+                1000,
+            )
+            .unwrap();
+
+        // Submit task pinned to pool-a (requires cellular + pool=alpha)
+        let mut t1 = make_test_task("t-alpha", 60, false, ExecutionEngine::WasmWasi);
+        t1.node_group_affinity = "pool-a".to_string();
+        scheduler.submit_task(t1).unwrap();
+
+        // wifi-beta cannot claim t-alpha
+        let beta_sync = scheduler
+            .sync_node_state("wifi-beta", &wifi_beta.session_token, &[], 1100)
+            .unwrap();
+        assert!(beta_sync.desired_tasks.is_empty());
+
+        // cell-alpha updates transport -> cellular on claim and claims t-alpha
+        let cell_claim = scheduler
+            .claim_cellular_task_nominal("cell-alpha", 90, false, 1200)
+            .unwrap();
+        assert!(cell_claim.task_available);
+        assert_eq!(cell_claim.task.unwrap().task_id, "t-alpha");
+
+        // Now submit a task pinned to pool-wifi-a, and lease it to cell-alpha? No, test preemption!
+        let mut t2 = make_test_task("t-preempt-a", 60, false, ExecutionEngine::WasmWasi);
+        t2.node_group_affinity = "pool-wifi-a".to_string();
+        scheduler.submit_task(t2).unwrap();
+        let cell_claim2 = scheduler
+            .claim_cellular_task_nominal("cell-alpha", 90, false, 1250)
+            .unwrap();
+        assert!(cell_claim2.task_available);
+
+        // wifi-beta MUST NOT speculatively preempt t-preempt-a because of pool-wifi-a affinity
+        let beta_sync2 = scheduler
+            .sync_node_state("wifi-beta", &wifi_beta.session_token, &[], 1300)
+            .unwrap();
+        assert!(beta_sync2.desired_tasks.is_empty());
+
+        // wifi-alpha CAN speculatively preempt t-preempt-a
+        let alpha_sync = scheduler
+            .sync_node_state("wifi-alpha", &wifi_alpha.session_token, &[], 1350)
+            .unwrap();
+        assert_eq!(alpha_sync.desired_tasks.len(), 1);
+        assert_eq!(alpha_sync.desired_tasks[0].task_id, "t-preempt-a");
+        assert_eq!(alpha_sync.desired_tasks[0].run_attempt, 2);
+    }
+
+    #[test]
+    fn test_drain_and_upgrade_nodes_lifecycle() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "beta".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: vec!["w1".to_string(), "w2".to_string()],
+                },
+                1000,
+            )
+            .unwrap();
+        let w1 = scheduler
+            .register_node(
+                "w1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        let w2 = scheduler
+            .register_node(
+                "w2".to_string(),
+                make_test_capabilities(false, false),
+                "0.2.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        // UpgradeNodes skips w2 (already on 0.2.0) and drains only w1
+        let upg = scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: "beta".to_string(),
+                node_ids: Vec::new(),
+                target_version: "0.2.0".to_string(),
+                drain_before_upgrade: true,
+            })
+            .unwrap();
+        assert_eq!(upg.targeted_nodes, 1);
+        assert_eq!(upg.targeted_node_ids, vec!["w1"]);
+
+        scheduler
+            .submit_task(make_test_task(
+                "t-drain",
+                60,
+                false,
+                ExecutionEngine::WasmWasi,
+            ))
+            .unwrap();
+
+        // w1 is draining: receives desired_client_version=0.2.0 and NO task
+        let s1 = scheduler
+            .sync_node_state("w1", &w1.session_token, &[], 1100)
+            .unwrap();
+        assert!(s1.desired_tasks.is_empty());
+        assert_eq!(s1.desired_client_version, "0.2.0");
+
+        // w2 was NOT drained and is at 0.2.0: receives task and empty desired_client_version
+        let s2 = scheduler
+            .sync_node_state("w2", &w2.session_token, &[], 1100)
+            .unwrap();
+        assert_eq!(s2.desired_tasks.len(), 1);
+        assert_eq!(s2.desired_client_version, "");
+
+        // Undrain w1
+        let undrain = scheduler
+            .drain_nodes(DrainNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["w1".to_string()],
+                drain: false,
+            })
+            .unwrap();
+        assert_eq!(undrain.affected_nodes, 1);
+        assert!(
+            !scheduler
+                .list_worker_nodes()
+                .into_iter()
+                .find(|n| n.node_id == "w1")
+                .unwrap()
+                .draining
+        );
     }
 }

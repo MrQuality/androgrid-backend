@@ -150,6 +150,29 @@ impl From<SchedulingError> for Status {
             SchedulingError::TaskIdCollision(msg) => {
                 Status::already_exists(format!("TASK_ID_COLLISION: {}", msg))
             }
+
+            SchedulingError::NodeGroupNotFound(group_id) => Status::not_found(format!(
+                "NODE_GROUP_NOT_FOUND: NodeGroup '{}' does not exist",
+                group_id
+            )),
+
+            SchedulingError::NodeGroupAlreadyExists(group_id) => Status::already_exists(format!(
+                "NODE_GROUP_ALREADY_EXISTS: NodeGroup '{}' already exists",
+                group_id
+            )),
+
+            SchedulingError::NodeGroupLimitExceeded(max) => Status::resource_exhausted(format!(
+                "NODE_GROUP_LIMIT_EXCEEDED: maximum NodeGroup count ({}) reached",
+                max
+            )),
+
+            SchedulingError::InvalidNodeLabels(msg) => {
+                Status::invalid_argument(format!("INVALID_NODE_LABELS: {}", msg))
+            }
+
+            SchedulingError::InvalidNodeGroupRequest(msg) => {
+                Status::invalid_argument(format!("INVALID_NODE_GROUP_REQUEST: {}", msg))
+            }
         }
     }
 }

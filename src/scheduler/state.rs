@@ -2,7 +2,12 @@
 //!
 //! Traces to: AG-SPEC-2026-V2 Section 4.1, Section 6.1, Section 6.2, [INV-004], [INV-005], [INV-006]
 
-use crate::{ExecutionEngine, NodeCapabilities, TaskGroupState, TaskSpec, TaskState, TaskTemplate};
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{
+    ExecutionEngine, NetworkTransportType, NodeCapabilities, TaskGroupState, TaskSpec, TaskState,
+    TaskTemplate,
+};
 
 /// Execution artifacts committed by a winning worker node.
 ///
@@ -92,6 +97,10 @@ pub struct WorkerRecord {
     pub thermal_status: u32,
     pub last_seen_epoch_ms: u64,
     pub active_task_ids: Vec<String>,
+    pub labels: BTreeMap<String, String>,
+    pub explicit_node_group: Option<String>,
+    pub draining: bool,
+    pub desired_client_version: Option<String>,
 }
 
 impl WorkerRecord {
@@ -101,6 +110,58 @@ impl WorkerRecord {
     pub fn allows_root_execution(&self) -> bool {
         self.capabilities.is_rooted
     }
+
+    /// Computes effective labels combining worker-reported labels with synthesized
+    /// hardware and network topology labels under the reserved `androgrid.io/` prefix.
+    ///
+    /// Traces to: [REQ-OP-001], [REQ-VER-002], [INV-006]
+    pub fn effective_labels(&self) -> BTreeMap<String, String> {
+        let mut out = self.labels.clone();
+        out.insert(
+            "androgrid.io/rooted".to_string(),
+            if self.capabilities.is_rooted {
+                "true"
+            } else {
+                "false"
+            }
+            .to_string(),
+        );
+        match NetworkTransportType::try_from(self.capabilities.current_transport) {
+            Ok(NetworkTransportType::NetworkTransportWifiLan) => {
+                out.insert("androgrid.io/transport".to_string(), "wifi".to_string());
+            }
+            Ok(NetworkTransportType::NetworkTransportCellularWan) => {
+                out.insert("androgrid.io/transport".to_string(), "cellular".to_string());
+            }
+            _ => {}
+        }
+        if !self.capabilities.abi.is_empty() {
+            out.insert(
+                "androgrid.io/abi".to_string(),
+                self.capabilities.abi.clone(),
+            );
+        }
+        if !self.capabilities.os_version.is_empty() {
+            out.insert(
+                "androgrid.io/os".to_string(),
+                self.capabilities.os_version.clone(),
+            );
+        }
+        out
+    }
+}
+
+/// In-memory logical NodeGroup partition for targeted fleet operations and workload affinity.
+///
+/// Traces to: [REQ-OP-001], [REQ-OP-002], [INV-005], [INV-006], [REQ-VER-002]
+#[derive(Debug, Clone)]
+pub struct NodeGroupRecord {
+    pub group_id: String,
+    pub description: String,
+    pub label_selector: BTreeMap<String, String>,
+    pub member_node_ids: BTreeSet<String>,
+    pub created_at_epoch_ms: u64,
+    pub updated_at_epoch_ms: u64,
 }
 
 /// In-memory coordination record for a partitioned TaskGroup and its monotonic epoch.

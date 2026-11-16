@@ -180,9 +180,12 @@ impl ClusterScheduler {
                 "node_id must be 1..=128 printable non-whitespace ASCII chars".to_string(),
             ));
         }
-        if client_version.len() > 128 {
+        if client_version.is_empty()
+            || client_version.len() > 128
+            || !client_version.bytes().all(|b| (0x21..=0x7E).contains(&b))
+        {
             return Err(SchedulingError::InvalidNodeGroupRequest(
-                "client_version must not exceed 128 bytes".to_string(),
+                "client_version must be 1..=128 printable non-whitespace ASCII chars".to_string(),
             ));
         }
         let validated_labels = validate_labels(&labels, false)?;
@@ -1869,6 +1872,10 @@ impl ClusterScheduler {
             if let Some(w) = inner.workers.get_mut(&nid) {
                 if w.client_version == target_version {
                     w.desired_client_version = None;
+                    if w.drained_for_upgrade {
+                        w.draining = false;
+                        w.drained_for_upgrade = false;
+                    }
                     continue;
                 }
                 w.desired_client_version = Some(target_version.clone());

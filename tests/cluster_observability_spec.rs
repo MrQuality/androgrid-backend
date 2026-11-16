@@ -139,6 +139,7 @@ async fn test_cluster_snapshot_endpoint() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler
         .submit_task(spec)
@@ -252,6 +253,7 @@ async fn test_server_sent_events_stream_broadcast() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler
         .submit_task(spec)
@@ -321,6 +323,7 @@ async fn test_speculative_preemption_event_emission_and_attempt_fencing() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler
         .submit_task(spec)
@@ -582,6 +585,7 @@ async fn test_admin_service_list_tasks_grpc() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     let task2 = TaskSpec {
         task_id: "grpc-task-02".to_string(),
@@ -597,6 +601,7 @@ async fn test_admin_service_list_tasks_grpc() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler.submit_task(task1).expect("Task 1 submission");
     scheduler.submit_task(task2).expect("Task 2 submission");

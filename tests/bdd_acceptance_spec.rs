@@ -176,6 +176,7 @@ async fn test_bdd_scenario_1_cellular_disconnected_execution_and_zero_keepalive(
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     harness.scheduler.submit_task(task_501).unwrap();
 
@@ -197,6 +198,7 @@ async fn test_bdd_scenario_1_cellular_disconnected_execution_and_zero_keepalive(
             thermal_status: 0,
         }),
         client_version: "0.1.0".to_string(),
+        labels: Default::default(),
     };
     client
         .register_node(reg_req)
@@ -305,6 +307,7 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     harness.scheduler.submit_task(task_601).unwrap();
 
@@ -327,6 +330,7 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
                 thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .unwrap();
@@ -387,6 +391,7 @@ async fn test_bdd_scenario_2_cellular_spot_dual_assignment_and_monotonic_fencing
                 thermal_status: 0,
             }),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .unwrap()
@@ -498,6 +503,7 @@ async fn test_bdd_scenario_3_sandbox_isolation_guard_for_unrooted_nodes() {
             thermal_status: 0,
         }),
         client_version: "0.1.0".to_string(),
+        labels: Default::default(),
     };
 
     let reg_res = client
@@ -538,6 +544,7 @@ async fn test_bdd_scenario_3_sandbox_isolation_guard_for_unrooted_nodes() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     harness.scheduler.submit_task(privileged_task).unwrap();
 
@@ -593,6 +600,7 @@ async fn test_bdd_scenario_4_thermal_aware_task_scheduling_and_battery_protectio
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     harness.scheduler.submit_task(task_spec).unwrap();
 
@@ -613,6 +621,7 @@ async fn test_bdd_scenario_4_thermal_aware_task_scheduling_and_battery_protectio
             thermal_status: 1,
         }),
         client_version: "0.1.0".to_string(),
+        labels: Default::default(),
     };
     client
         .register_node(reg_req)

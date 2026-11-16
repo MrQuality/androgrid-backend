@@ -79,6 +79,30 @@ service AdminService {
   // List all registered TaskGroups and their current epoch summaries.
   // Traces to: [REQ-OP-004]
   rpc ListTaskGroups(ListTaskGroupsRequest) returns (ListTaskGroupsResponse);
+
+  // Create a logical NodeGroup for fleet partitioning and targeted operations.
+  // Traces to: [REQ-OP-001], [INV-005], [INV-006], [REQ-VER-002]
+  rpc CreateNodeGroup(CreateNodeGroupRequest) returns (CreateNodeGroupResponse);
+
+  // Update a NodeGroup description or label selector.
+  // Traces to: [REQ-OP-001], [REQ-VER-002]
+  rpc UpdateNodeGroup(UpdateNodeGroupRequest) returns (UpdateNodeGroupResponse);
+
+  // List all registered NodeGroups and their active node counts.
+  // Traces to: [REQ-OP-001], [NFR-PERF-001]
+  rpc ListNodeGroups(ListNodeGroupsRequest) returns (ListNodeGroupsResponse);
+
+  // Explicitly assign or unassign worker nodes to a NodeGroup.
+  // Traces to: [REQ-OP-001], [NFR-REL-001]
+  rpc AssignNodesToGroup(AssignNodesToGroupRequest) returns (AssignNodesToGroupResponse);
+
+  // Drain or undrain targeted worker nodes to prevent new task leases.
+  // Traces to: [REQ-OP-002], [REQ-OP-003], [NFR-REL-001]
+  rpc DrainNodes(DrainNodesRequest) returns (DrainNodesResponse);
+
+  // Signal a target client version upgrade to a NodeGroup or explicit node list.
+  // Traces to: [REQ-OP-002], [INV-003], [NFR-POW-001]
+  rpc UpgradeNodes(UpgradeNodesRequest) returns (UpgradeNodesResponse);
 }
 
 // EnrollmentService provides bootstrap enrollment for unprovisioned worker nodes.
@@ -170,6 +194,7 @@ message TaskSpec {
   string artifact_url = 11 [deprecated = true];
   string group_id = 12;
   uint64 group_epoch = 13;
+  string node_group_affinity = 14;
 }
 
 // Unary request to claim a spot task over cellular WAN.
@@ -217,6 +242,7 @@ message RegisterNodeRequest {
   string node_id = 1;
   NodeCapabilities capabilities = 2;
   string client_version = 3;
+  map<string, string> labels = 4;
 }
 
 // Registration lease response.
@@ -253,6 +279,7 @@ message SyncNodeStateResponse {
   repeated TaskSpec desired_tasks = 2;
   repeated string cancel_task_ids = 3;
   repeated string acknowledged_task_ids = 4;
+  string desired_client_version = 5;
 }
 
 
@@ -295,6 +322,10 @@ message WorkerNodeInfo {
   NodeCapabilities capabilities = 2;
   string client_version = 3;
   uint64 last_heartbeat_epoch_seconds = 4;
+  map<string, string> labels = 5;
+  string node_group = 6;
+  bool draining = 7;
+  string desired_client_version = 8;
 }
 
 // Response containing all registered worker nodes.
@@ -385,6 +416,7 @@ message TaskInfo {
   uint64 execution_duration_ms = 9;
   string error_message = 10;
   string speculative_node_id = 11;
+  string node_group_affinity = 12;
 }
 
 // Response containing compute tasks.
@@ -418,6 +450,7 @@ message TaskTemplate {
   string artifact_sha256 = 5;
   string shell_command = 6;
   bool requires_unmetered = 7;
+  string node_group_affinity = 8;
 }
 
 // Per-partition environment overrides within a TaskGroup.
@@ -547,6 +580,104 @@ message RenewCertificateResponse {
   string ca_cert_pem = 2;
   // Server-authoritative expiration timestamp (Unix epoch seconds).
   uint64 not_after_epoch_seconds = 3;
+}
+
+// Logical fleet partition for heterogeneous worker nodes.
+// Traces to: [REQ-OP-001], [INV-005], [INV-006], [REQ-VER-002]
+message NodeGroup {
+  string group_id = 1;
+  string description = 2;
+  map<string, string> label_selector = 3;
+  repeated string member_node_ids = 4;
+  uint32 active_node_count = 5;
+  uint64 created_at_epoch_ms = 6;
+  uint64 updated_at_epoch_ms = 7;
+}
+
+// Request to create a new NodeGroup.
+message CreateNodeGroupRequest {
+  string group_id = 1;
+  string description = 2;
+  map<string, string> label_selector = 3;
+  repeated string initial_node_ids = 4;
+}
+
+// Response acknowledging NodeGroup creation.
+message CreateNodeGroupResponse {
+  bool created = 1;
+  NodeGroup group = 2;
+  string message = 3;
+}
+
+// Request to update an existing NodeGroup.
+message UpdateNodeGroupRequest {
+  string group_id = 1;
+  optional string description = 2;
+  map<string, string> label_selector = 3;
+  bool replace_label_selector = 4;
+}
+
+// Response acknowledging NodeGroup update.
+message UpdateNodeGroupResponse {
+  bool updated = 1;
+  NodeGroup group = 2;
+  string message = 3;
+}
+
+// Request to list all registered NodeGroups.
+message ListNodeGroupsRequest {}
+
+// Response containing all registered NodeGroups.
+message ListNodeGroupsResponse {
+  repeated NodeGroup groups = 1;
+}
+
+// Request to assign or unassign worker nodes from a NodeGroup.
+message AssignNodesToGroupRequest {
+  string group_id = 1;
+  repeated string node_ids = 2;
+  bool unassign = 3;
+}
+
+// Response acknowledging node group membership changes.
+message AssignNodesToGroupResponse {
+  bool success = 1;
+  string group_id = 2;
+  uint32 affected_nodes = 3;
+  NodeGroup group = 4;
+  string message = 5;
+}
+
+// Request to drain or undrain targeted worker nodes.
+message DrainNodesRequest {
+  string node_group = 1;
+  repeated string node_ids = 2;
+  bool drain = 3;
+}
+
+// Response acknowledging node drain state changes.
+message DrainNodesResponse {
+  bool success = 1;
+  uint32 affected_nodes = 2;
+  repeated string affected_node_ids = 3;
+  string message = 4;
+}
+
+// Request to signal a target client version upgrade to targeted worker nodes.
+message UpgradeNodesRequest {
+  string node_group = 1;
+  repeated string node_ids = 2;
+  string target_version = 3;
+  bool drain_before_upgrade = 4;
+}
+
+// Response acknowledging node upgrade signaling.
+message UpgradeNodesResponse {
+  bool success = 1;
+  uint32 targeted_nodes = 2;
+  repeated string targeted_node_ids = 3;
+  string target_version = 4;
+  string message = 5;
 }
 
 

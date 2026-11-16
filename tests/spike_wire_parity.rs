@@ -177,6 +177,7 @@ fn spike_task_spec_wasm_bytecode_payload_bounds() {
         artifact_url: "https://cdn.androgrid.net/wasm/task_501.wasm".to_string(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
 
     let response = ClaimCellularTaskResponse {
@@ -259,6 +260,7 @@ fn spike_tonic_service_trait_definition_presence() {
                 desired_tasks: Vec::new(),
                 cancel_task_ids: Vec::new(),
                 acknowledged_task_ids: Vec::new(),
+                desired_client_version: String::new(),
             }))
         }
 

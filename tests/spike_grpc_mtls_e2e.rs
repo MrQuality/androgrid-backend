@@ -192,6 +192,7 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
             thermal_status: 0,
         }),
         client_version: "1.0.0".to_string(),
+        labels: Default::default(),
     };
 
     let reg_res = client
@@ -218,6 +219,7 @@ async fn spike_live_grpc_mtls_full_lifecycle_and_monotonic_fencing() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
     scheduler.submit_task(task_spec).unwrap();
 
@@ -371,6 +373,7 @@ async fn spike_live_grpc_mtls_rejects_untrusted_client_certificate() {
                     node_id: "rogue-node".to_string(),
                     capabilities: None,
                     client_version: "1.0.0".to_string(),
+                    labels: Default::default(),
                 })
                 .await;
             assert!(

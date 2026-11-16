@@ -107,4 +107,24 @@ pub enum SchedulingError {
 
     #[error("Task ID collision: {0}")]
     TaskIdCollision(String),
+
+    /// Traces to: [REQ-OP-001]
+    #[error("NodeGroup '{0}' not found")]
+    NodeGroupNotFound(String),
+
+    /// Traces to: [REQ-OP-001]
+    #[error("NodeGroup '{0}' already exists")]
+    NodeGroupAlreadyExists(String),
+
+    /// Traces to: [REQ-OP-001], [NFR-PERF-001]
+    #[error("NodeGroup count limit ({0}) exceeded")]
+    NodeGroupLimitExceeded(usize),
+
+    /// Traces to: [REQ-OP-001], [REQ-VER-002]
+    #[error("Invalid node label or selector: {0}")]
+    InvalidNodeLabels(String),
+
+    /// Traces to: [REQ-OP-001], [REQ-OP-002]
+    #[error("Invalid node group operation request: {0}")]
+    InvalidNodeGroupRequest(String),
 }

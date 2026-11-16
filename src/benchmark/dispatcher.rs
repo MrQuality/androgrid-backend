@@ -316,6 +316,7 @@ impl BenchmarkDispatcher {
                 artifact_url: artifact_url.clone(),
                 group_id: String::new(),
                 group_epoch: 0,
+                node_group_affinity: String::new(),
             };
 
             total_transferred += tile.payload_bytes.len();

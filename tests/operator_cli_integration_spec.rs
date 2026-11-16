@@ -171,6 +171,7 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
 
     let submit_res = admin_client
@@ -214,6 +215,7 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
             node_id: "android_node_pixel8".to_string(),
             capabilities: Some(worker_caps.clone()),
             client_version: "0.1.0".to_string(),
+            labels: Default::default(),
         })
         .await
         .expect("Worker registration should succeed")
@@ -303,6 +305,7 @@ async fn test_operator_end_to_end_lifecycle_and_observability() {
         artifact_url: String::new(),
         group_id: String::new(),
         group_epoch: 0,
+        node_group_affinity: String::new(),
     };
 
     admin_client
@@ -393,6 +396,7 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
         node_id: "android_node_wasm_verifier".to_string(),
         capabilities: Some(worker_caps.clone()),
         client_version: "0.1.0".to_string(),
+        labels: Default::default(),
     };
     worker_client.register_node(reg_req).await.unwrap();
 
@@ -469,6 +473,7 @@ async fn test_operator_submits_canonical_wasm_workload_fixtures_and_verifies_sha
             artifact_url: String::new(),
             group_id: String::new(),
             group_epoch: 0,
+            node_group_affinity: String::new(),
         };
 
         // Submit task via AdminService

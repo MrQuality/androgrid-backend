@@ -15,14 +15,15 @@ use std::time::SystemTime;
 use androgrid_backend::admin_service_client::AdminServiceClient;
 use androgrid_backend::{
     build_client_mtls_config, cert_init, cert_issue_admin, cert_issue_csr, cert_issue_server,
-    export_png, render_ansi_qr, ArtifactPackager, BenchmarkConfig, BenchmarkDispatcher,
-    BenchmarkFilter, CaSource, CancelTaskGroupRequest, CancelTaskRequest, ExecutionEngine,
-    GeneratePairingTokenRequest, GetTaskGroupStatusRequest, GetTaskStatusRequest,
-    ListTaskGroupsRequest, ListTasksRequest, ListWorkerNodesRequest, PkiInitConfig,
-    PkiIssueAdminConfig, PkiIssueCsrConfig, PkiIssueServerConfig, PkiOperationSummary,
-    ReplaceStrategy, ReplaceTaskGroupRequest, SubmitTaskGroupRequest, SubmitTaskRequest,
-    TaskGroupSpec, TaskGroupState, TaskPartitionSpec, TaskSpec, TaskState, TaskTemplate,
-    TerminalGuard, TuiAction, TuiApp, UploadArtifactRequest, WasiValidator,
+    export_png, render_ansi_qr, ArtifactPackager, AssignNodesToGroupRequest, BenchmarkConfig,
+    BenchmarkDispatcher, BenchmarkFilter, CaSource, CancelTaskGroupRequest, CancelTaskRequest,
+    CreateNodeGroupRequest, DrainNodesRequest, ExecutionEngine, GeneratePairingTokenRequest,
+    GetTaskGroupStatusRequest, GetTaskStatusRequest, ListNodeGroupsRequest, ListTaskGroupsRequest,
+    ListTasksRequest, ListWorkerNodesRequest, PkiInitConfig, PkiIssueAdminConfig,
+    PkiIssueCsrConfig, PkiIssueServerConfig, PkiOperationSummary, ReplaceStrategy,
+    ReplaceTaskGroupRequest, SubmitTaskGroupRequest, SubmitTaskRequest, TaskGroupSpec,
+    TaskGroupState, TaskPartitionSpec, TaskSpec, TaskState, TaskTemplate, TerminalGuard, TuiAction,
+    TuiApp, UpdateNodeGroupRequest, UpgradeNodesRequest, UploadArtifactRequest, WasiValidator,
 };
 
 #[derive(Parser, Debug)]
@@ -120,6 +121,10 @@ enum Commands {
         /// Environment variables in KEY=VALUE format
         #[arg(long, value_parser = parse_key_val)]
         env: Vec<(String, String)>,
+
+        /// Optional target NodeGroup affinity for scheduling
+        #[arg(long)]
+        node_group: Option<String>,
     },
 
     /// Query the status and output of a specific task
@@ -222,6 +227,116 @@ enum Commands {
         #[command(subcommand)]
         action: GroupCommands,
     },
+
+    /// Logical NodeGroup partitioning and membership management
+    /// Traces to: ADR-007, [REQ-OP-001], [INV-005], [INV-006], [REQ-VER-002]
+    NodeGroup {
+        #[command(subcommand)]
+        action: NodeGroupCommands,
+    },
+
+    /// Drain or undrain worker nodes so they stop accepting new task leases
+    /// Traces to: ADR-007, [REQ-OP-002], [REQ-OP-003], [NFR-REL-001]
+    Drain {
+        /// Target NodeGroup identifier
+        #[arg(long, conflicts_with = "node_id", required_unless_present = "node_id")]
+        node_group: Option<String>,
+
+        /// Explicit worker node ID(s) to drain (repeatable)
+        #[arg(
+            long,
+            conflicts_with = "node_group",
+            required_unless_present = "node_group"
+        )]
+        node_id: Vec<String>,
+
+        /// Restore scheduling eligibility instead of draining
+        #[arg(long)]
+        undrain: bool,
+    },
+
+    /// Signal a target client version upgrade to a NodeGroup or explicit worker nodes
+    /// Traces to: ADR-007, [REQ-OP-002], [INV-003], [NFR-POW-001]
+    UpgradeNodes {
+        /// Target NodeGroup identifier
+        #[arg(long, conflicts_with = "node_id", required_unless_present = "node_id")]
+        node_group: Option<String>,
+
+        /// Explicit worker node ID(s) to upgrade (repeatable)
+        #[arg(
+            long,
+            conflicts_with = "node_group",
+            required_unless_present = "node_group"
+        )]
+        node_id: Vec<String>,
+
+        /// Target client version string (e.g. 0.2.0)
+        #[arg(long)]
+        target_version: String,
+
+        /// Drain targeted nodes before signaling upgrade
+        #[arg(long)]
+        drain: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum NodeGroupCommands {
+    /// Create a new logical NodeGroup
+    Create {
+        /// Unique NodeGroup identifier (^[a-zA-Z0-9_-]{1,64}$)
+        #[arg(long)]
+        group_id: String,
+
+        /// Human-readable description
+        #[arg(long, default_value = "")]
+        description: String,
+
+        /// Label selector in KEY=VALUE format (repeatable)
+        #[arg(long, value_parser = parse_key_val)]
+        selector: Vec<(String, String)>,
+
+        /// Initial worker node ID(s) to pin explicitly (repeatable)
+        #[arg(long)]
+        node: Vec<String>,
+    },
+
+    /// Update an existing NodeGroup description or label selector
+    Update {
+        /// Target NodeGroup identifier
+        #[arg(long)]
+        group_id: String,
+
+        /// Updated description
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Replacement label selector in KEY=VALUE format (repeatable)
+        #[arg(long, value_parser = parse_key_val)]
+        selector: Vec<(String, String)>,
+
+        /// Replace the existing label selector (required when passing --selector or clearing)
+        #[arg(long)]
+        replace_selector: bool,
+    },
+
+    /// List all registered NodeGroups
+    List,
+
+    /// Assign or unassign worker nodes to/from a NodeGroup
+    Assign {
+        /// Target NodeGroup identifier
+        #[arg(long)]
+        group_id: String,
+
+        /// Worker node ID(s) to assign or unassign (repeatable)
+        #[arg(long, required = true)]
+        node: Vec<String>,
+
+        /// Remove the specified node(s) from the NodeGroup instead of assigning
+        #[arg(long)]
+        unassign: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -263,6 +378,10 @@ enum GroupCommands {
         /// Shared environment variables (KEY=VALUE)
         #[arg(long, value_parser = parse_key_val)]
         env: Vec<(String, String)>,
+
+        /// Optional target NodeGroup affinity for scheduling
+        #[arg(long)]
+        node_group: Option<String>,
     },
 
     /// Atomically replace a TaskGroup workload with a new epoch
@@ -310,6 +429,10 @@ enum GroupCommands {
         /// Shared environment variables (KEY=VALUE)
         #[arg(long, value_parser = parse_key_val)]
         env: Vec<(String, String)>,
+
+        /// Optional target NodeGroup affinity for scheduling
+        #[arg(long)]
+        node_group: Option<String>,
     },
 
     /// Cancel an active or draining TaskGroup
@@ -529,6 +652,9 @@ struct WorkerNodeOutput {
     battery_temperature_celsius: i32,
     thermal_status: String,
     client_version: String,
+    node_group: String,
+    draining: bool,
+    desired_client_version: String,
 }
 
 /// Maps integer thermal status to Android PowerManager thermal status badge string.
@@ -871,6 +997,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle_group_command(&mut client, action, &cli.format).await?;
         }
 
+        Commands::NodeGroup { action } => {
+            handle_node_group_command(&mut client, action, &cli.format).await?;
+        }
+
+        Commands::Drain {
+            node_group,
+            node_id,
+            undrain,
+        } => {
+            let res = client
+                .drain_nodes(DrainNodesRequest {
+                    node_group: node_group.unwrap_or_default(),
+                    node_ids: node_id,
+                    drain: !undrain,
+                })
+                .await?
+                .into_inner();
+            if cli.format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "success": res.success,
+                        "affected_nodes": res.affected_nodes,
+                        "affected_node_ids": res.affected_node_ids,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!("{}", res.message);
+            }
+        }
+
+        Commands::UpgradeNodes {
+            node_group,
+            node_id,
+            target_version,
+            drain,
+        } => {
+            let res = client
+                .upgrade_nodes(UpgradeNodesRequest {
+                    node_group: node_group.unwrap_or_default(),
+                    node_ids: node_id,
+                    target_version,
+                    drain_before_upgrade: drain,
+                })
+                .await?
+                .into_inner();
+            if cli.format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "success": res.success,
+                        "targeted_nodes": res.targeted_nodes,
+                        "targeted_node_ids": res.targeted_node_ids,
+                        "target_version": res.target_version,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!("{}", res.message);
+            }
+        }
+
         Commands::Top { refresh_rate } => {
             run_top(client, &cli.endpoint, refresh_rate).await?;
         }
@@ -886,6 +1075,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             requires_unmetered,
             artifact_url,
             env,
+            node_group,
         } => {
             let actual_task_id = task_id.unwrap_or_else(|| {
                 let millis = SystemTime::now()
@@ -969,6 +1159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 artifact_url: resolved_artifact_url,
                 group_id: String::new(),
                 group_epoch: 0,
+                node_group_affinity: node_group.unwrap_or_default(),
             };
 
             let response = client
@@ -1068,6 +1259,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     battery_temperature_celsius: caps.battery_temperature_celsius,
                     thermal_status: thermal_badge.to_string(),
                     client_version: node.client_version,
+                    node_group: node.node_group,
+                    draining: node.draining,
+                    desired_client_version: node.desired_client_version,
                 });
             }
 
@@ -1079,7 +1273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  (No worker nodes currently registered)");
                 } else {
                     println!(
-                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
+                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9} {:<20}",
                         "NODE ID",
                         "CORES",
                         "RAM (MB)",
@@ -1088,17 +1282,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "ROOTED",
                         "TEMP (°C)",
                         "THERMAL",
-                        "TRANSPORT"
+                        "TRANSPORT",
+                        "NODE GROUP",
+                        "DRAINING",
+                        "VERSION"
                     );
-                    println!("{}", "-".repeat(108));
+                    println!("{}", "-".repeat(155));
                     for n in node_outputs {
                         let temp_str = if n.battery_temperature_celsius <= 0 {
                             "N/A".to_string()
                         } else {
                             format!("{}°C", n.battery_temperature_celsius)
                         };
+                        let group_str = if n.node_group.is_empty() {
+                            "-".to_string()
+                        } else {
+                            n.node_group
+                        };
+                        let version_str = if n.desired_client_version.is_empty() {
+                            n.client_version
+                        } else {
+                            format!("{} -> {}", n.client_version, n.desired_client_version)
+                        };
                         println!(
-                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
+                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9} {:<20}",
                             n.node_id,
                             n.cpu_cores,
                             n.ram_mb,
@@ -1107,7 +1314,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if n.is_rooted { "YES" } else { "NO" },
                             temp_str,
                             n.thermal_status,
-                            n.transport
+                            n.transport,
+                            group_str,
+                            if n.draining { "YES" } else { "NO" },
+                            version_str
                         );
                     }
                 }
@@ -1388,6 +1598,7 @@ struct GroupTemplateArgs {
     timeout: u32,
     requires_unmetered: bool,
     env: Vec<(String, String)>,
+    node_group: Option<String>,
 }
 
 async fn resolve_group_template(
@@ -1402,6 +1613,7 @@ async fn resolve_group_template(
         timeout,
         requires_unmetered,
         env,
+        node_group,
     } = args;
     let (engine, shell_command, artifact_sha256) = if let Some(wasm_path) = wasm {
         let bytecode = tokio::fs::read(&wasm_path).await.map_err(|e| {
@@ -1439,6 +1651,7 @@ async fn resolve_group_template(
         artifact_sha256,
         shell_command,
         requires_unmetered,
+        node_group_affinity: node_group.unwrap_or_default(),
     })
 }
 
@@ -1558,6 +1771,7 @@ async fn handle_group_command(
             timeout,
             requires_unmetered,
             env,
+            node_group,
         } => {
             let template = resolve_group_template(
                 client,
@@ -1569,6 +1783,7 @@ async fn handle_group_command(
                     timeout,
                     requires_unmetered,
                     env,
+                    node_group,
                 },
             )
             .await?;
@@ -1612,6 +1827,7 @@ async fn handle_group_command(
             timeout,
             requires_unmetered,
             env,
+            node_group,
         } => {
             let strat = match strategy.to_ascii_lowercase().as_str() {
                 "immediate" => ReplaceStrategy::Immediate as i32,
@@ -1634,6 +1850,7 @@ async fn handle_group_command(
                     timeout,
                     requires_unmetered,
                     env,
+                    node_group,
                 },
             )
             .await?;
@@ -1753,6 +1970,151 @@ async fn handle_group_command(
                         g.total_tasks
                     );
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_node_group_command(
+    client: &mut AdminServiceClient<tonic::transport::Channel>,
+    action: NodeGroupCommands,
+    format: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        NodeGroupCommands::Create {
+            group_id,
+            description,
+            selector,
+            node,
+        } => {
+            let res = client
+                .create_node_group(CreateNodeGroupRequest {
+                    group_id,
+                    description,
+                    label_selector: selector.into_iter().collect(),
+                    initial_node_ids: node,
+                })
+                .await?
+                .into_inner();
+            let grp = res.group.unwrap_or_default();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "created": res.created,
+                        "group_id": grp.group_id,
+                        "description": grp.description,
+                        "label_selector": grp.label_selector,
+                        "member_node_ids": grp.member_node_ids,
+                        "active_node_count": grp.active_node_count,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!(
+                    "NodeGroup {} created (active_nodes={}, pinned={})",
+                    grp.group_id,
+                    grp.active_node_count,
+                    grp.member_node_ids.len()
+                );
+            }
+        }
+        NodeGroupCommands::Update {
+            group_id,
+            description,
+            selector,
+            replace_selector,
+        } => {
+            let res = client
+                .update_node_group(UpdateNodeGroupRequest {
+                    group_id,
+                    description,
+                    label_selector: selector.into_iter().collect(),
+                    replace_label_selector: replace_selector,
+                })
+                .await?
+                .into_inner();
+            let grp = res.group.unwrap_or_default();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "updated": res.updated,
+                        "group_id": grp.group_id,
+                        "description": grp.description,
+                        "label_selector": grp.label_selector,
+                        "member_node_ids": grp.member_node_ids,
+                        "active_node_count": grp.active_node_count,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!(
+                    "NodeGroup {} updated (active_nodes={})",
+                    grp.group_id, grp.active_node_count
+                );
+            }
+        }
+        NodeGroupCommands::List => {
+            let res = client
+                .list_node_groups(ListNodeGroupsRequest {})
+                .await?
+                .into_inner();
+            if format == "json" {
+                let items: Vec<_> = res
+                    .groups
+                    .iter()
+                    .map(|g| {
+                        serde_json::json!({
+                            "group_id": g.group_id,
+                            "description": g.description,
+                            "label_selector": g.label_selector,
+                            "member_node_ids": g.member_node_ids,
+                            "active_node_count": g.active_node_count,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if res.groups.is_empty() {
+                println!("No NodeGroups registered.");
+            } else {
+                for g in &res.groups {
+                    println!(
+                        "{}  active={}  pinned={}  selector={:?}",
+                        g.group_id,
+                        g.active_node_count,
+                        g.member_node_ids.len(),
+                        g.label_selector
+                    );
+                }
+            }
+        }
+        NodeGroupCommands::Assign {
+            group_id,
+            node,
+            unassign,
+        } => {
+            let res = client
+                .assign_nodes_to_group(AssignNodesToGroupRequest {
+                    group_id,
+                    node_ids: node,
+                    unassign,
+                })
+                .await?
+                .into_inner();
+            if format == "json" {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "success": res.success,
+                        "group_id": res.group_id,
+                        "affected_nodes": res.affected_nodes,
+                        "message": res.message,
+                    })
+                );
+            } else {
+                println!("{}", res.message);
             }
         }
     }
@@ -2380,5 +2742,81 @@ mod tests {
         assert!(text_out.contains("timed_out=0"));
         assert!(text_out.contains("preempted=0"));
         assert!(text_out.contains("g1:e2:p0 [RUNNING]"));
+    }
+
+    #[test]
+    fn test_cli_parse_node_group_drain_and_upgrade_commands() {
+        let create = Cli::try_parse_from([
+            "androgrid-cli",
+            "node-group",
+            "create",
+            "--group-id",
+            "rack-01",
+            "--selector",
+            "rack=rig-01",
+            "--node",
+            "n1",
+        ])
+        .unwrap();
+        assert!(matches!(
+            create.command,
+            Commands::NodeGroup {
+                action: NodeGroupCommands::Create { .. }
+            }
+        ));
+
+        let drain =
+            Cli::try_parse_from(["androgrid-cli", "drain", "--node-group", "rack-01"]).unwrap();
+        assert!(matches!(
+            drain.command,
+            Commands::Drain {
+                node_group: Some(_),
+                undrain: false,
+                ..
+            }
+        ));
+
+        // Mutually exclusive --node-group and --node-id
+        assert!(Cli::try_parse_from([
+            "androgrid-cli",
+            "drain",
+            "--node-group",
+            "rack-01",
+            "--node-id",
+            "n1",
+        ])
+        .is_err());
+
+        let upg = Cli::try_parse_from([
+            "androgrid-cli",
+            "upgrade-nodes",
+            "--node-group",
+            "beta",
+            "--target-version",
+            "0.2.0",
+            "--drain",
+        ])
+        .unwrap();
+        assert!(matches!(
+            upg.command,
+            Commands::UpgradeNodes { drain: true, .. }
+        ));
+
+        let sub = Cli::try_parse_from([
+            "androgrid-cli",
+            "submit",
+            "--shell",
+            "echo hi",
+            "--node-group",
+            "rack-01",
+        ])
+        .unwrap();
+        assert!(matches!(
+            sub.command,
+            Commands::Submit {
+                node_group: Some(_),
+                ..
+            }
+        ));
     }
 }

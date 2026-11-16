@@ -417,3 +417,80 @@ async fn test_renewal_manager_policy_edge_cases() {
     assert_eq!(rl_err.code(), Code::ResourceExhausted);
     assert!(rl_err.metadata().get(HEADER_RETRY_AFTER_EPOCH).is_some());
 }
+
+#[tokio::test]
+async fn test_single_flight_failure_cancellation_fingerprint_denial_and_config_bounds() {
+    let pki = RenewalTestPki::generate_with_ca_days(3650);
+    let (worker_cert, _, _) = pki.issue_cert("worker-sf", "Edge Compute", 10);
+    let leaf_der = pem::parse(worker_cert).unwrap().into_contents();
+    let (_, parsed_leaf) = x509_parser::parse_x509_certificate(&leaf_der).unwrap();
+    let leaf_fp: [u8; 32] = Sha256::digest(&leaf_der).into();
+
+    let valid_peer = AuthenticatedPeer {
+        common_name: Some("worker-sf".to_string()),
+        organizational_unit: Some("Edge Compute".to_string()),
+        not_before_epoch_secs: parsed_leaf.validity().not_before.timestamp(),
+        not_after_epoch_secs: parsed_leaf.validity().not_after.timestamp(),
+        leaf_fingerprint_sha256: leaf_fp,
+        spki_der: parsed_leaf.public_key().raw.to_vec(),
+    };
+
+    // 1. Single-flight leader failure propagates directly without re-executing
+    let mgr = Arc::new(CertRenewalManager::new(
+        Some(Arc::clone(&pki.ca_signer)),
+        CertRenewalPolicy::default(),
+    ));
+    let (bad_csr, _) = build_p256_csr("wrong-cn");
+    let (r1, r2) = tokio::join!(
+        mgr.renew_certificate(Some(&valid_peer), &bad_csr),
+        mgr.renew_certificate(Some(&valid_peer), &bad_csr),
+    );
+    assert_eq!(r1.unwrap_err().code(), Code::InvalidArgument);
+    assert_eq!(r2.unwrap_err().code(), Code::InvalidArgument);
+
+    // 2. Cancelled leader cleans up in_flight guard so subsequent request succeeds
+    let (good_csr, _) = build_p256_csr("worker-sf");
+    let mgr_clone = Arc::clone(&mgr);
+    let peer_clone = valid_peer.clone();
+    let csr_clone = good_csr.clone();
+    let handle = tokio::spawn(async move {
+        mgr_clone
+            .renew_certificate(Some(&peer_clone), &csr_clone)
+            .await
+    });
+    handle.abort();
+    let _ = handle.await;
+    let after_abort = mgr.renew_certificate(Some(&valid_peer), &good_csr).await;
+    assert!(after_abort.is_ok());
+
+    // 3. deny_fingerprint blocks renewal even for a cached CSR
+    let fp_mgr = CertRenewalManager::new(
+        Some(Arc::clone(&pki.ca_signer)),
+        CertRenewalPolicy::default(),
+    );
+    let (csr_fp, _) = build_p256_csr("worker-sf");
+    fp_mgr
+        .renew_certificate(Some(&valid_peer), &csr_fp)
+        .await
+        .unwrap();
+    fp_mgr.deny_fingerprint(leaf_fp);
+    let fp_err = fp_mgr
+        .renew_certificate(Some(&valid_peer), &csr_fp)
+        .await
+        .unwrap_err();
+    assert_eq!(fp_err.code(), Code::PermissionDenied);
+
+    // 4. ClusterConfig renewal policy bounds validation
+    let cfg_zero = androgrid_backend::ClusterConfig {
+        cert_renewal_validity_days: 0,
+        ..Default::default()
+    };
+    assert!(cfg_zero.validate_renewal_policy().is_err());
+
+    let cfg_window = androgrid_backend::ClusterConfig {
+        cert_renewal_validity_days: 30,
+        cert_renewal_window_days: 30,
+        ..Default::default()
+    };
+    assert!(cfg_window.validate_renewal_policy().is_err());
+}

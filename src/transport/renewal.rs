@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex};
 use tonic::metadata::MetadataValue;
 use tonic::Status;
 use tracing::{info, warn};
@@ -42,6 +42,8 @@ pub struct CertRenewalPolicy {
     pub rate_limit_window_secs: u64,
     /// Maximum issuances permitted per node within `rate_limit_window_secs`.
     pub rate_limit_max_burst: usize,
+    /// Maximum entries retained in the in-memory idempotency cache.
+    pub max_cache_entries: usize,
 }
 
 impl Default for CertRenewalPolicy {
@@ -54,6 +56,7 @@ impl Default for CertRenewalPolicy {
             cache_ttl_secs: 600,
             rate_limit_window_secs: 3600,
             rate_limit_max_burst: 3,
+            max_cache_entries: 10_000,
         }
     }
 }
@@ -71,6 +74,38 @@ struct CachedRenewalEntry {
     expires_at_epoch_secs: u64,
 }
 
+type InFlightSender = watch::Sender<Option<Result<RenewCertificateResponse, Status>>>;
+type InFlightMap = Arc<std::sync::Mutex<HashMap<RenewalCacheKey, InFlightSender>>>;
+
+/// RAII guard ensuring an in-flight single-flight key is always removed on drop
+/// (including task cancellation or panic).
+struct InFlightGuard {
+    map: InFlightMap,
+    key: RenewalCacheKey,
+    tx: InFlightSender,
+    completed: bool,
+}
+
+impl InFlightGuard {
+    fn finish(mut self, result: &Result<RenewCertificateResponse, Status>) {
+        let _ = self.tx.send(Some(result.clone()));
+        self.completed = true;
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.map.lock() {
+            guard.remove(&self.key);
+        }
+        if !self.completed {
+            let _ = self.tx.send(Some(Err(Status::cancelled(
+                "Certificate renewal leader task was cancelled",
+            ))));
+        }
+    }
+}
+
 /// Manages in-band worker certificate renewals over authenticated mTLS 1.3 channels.
 ///
 /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
@@ -80,7 +115,7 @@ pub struct CertRenewalManager {
     denied_nodes: RwLock<HashSet<String>>,
     denied_fingerprints: RwLock<HashSet<[u8; 32]>>,
     cache: Mutex<HashMap<RenewalCacheKey, CachedRenewalEntry>>,
-    in_flight: Mutex<HashMap<RenewalCacheKey, Arc<Notify>>>,
+    in_flight: InFlightMap,
     rate_limits: Mutex<HashMap<String, VecDeque<u64>>>,
 }
 
@@ -102,7 +137,7 @@ impl CertRenewalManager {
             denied_nodes: RwLock::new(HashSet::new()),
             denied_fingerprints: RwLock::new(HashSet::new()),
             cache: Mutex::new(HashMap::new()),
-            in_flight: Mutex::new(HashMap::new()),
+            in_flight: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rate_limits: Mutex::new(HashMap::new()),
         }
     }
@@ -199,42 +234,49 @@ impl CertRenewalManager {
             return Ok(cached);
         }
 
-        // Single-flight coalescing for concurrent identical requests
-        loop {
-            let maybe_wait = {
-                let mut in_flight = self.in_flight.lock().await;
-                if let Some(notify) = in_flight.get(&cache_key) {
-                    Some(Arc::clone(notify))
-                } else {
-                    in_flight.insert(cache_key.clone(), Arc::new(Notify::new()));
-                    None
-                }
-            };
-
-            if let Some(notify) = maybe_wait {
-                notify.notified().await;
-                let check_now = Self::now_epoch_secs();
-                self.authorize_peer(Some(peer), check_now)?;
-                if let Some(cached) = self.lookup_cache(&cache_key, check_now.max(0) as u64).await {
-                    return Ok(cached);
-                }
-                continue;
+        // Single-flight coalescing with RAII drop guard (cancellation/panic-safe)
+        let (rx_opt, guard_opt) = {
+            let mut in_flight = self
+                .in_flight
+                .lock()
+                .map_err(|_| Status::internal("Renewal in-flight lock poisoned"))?;
+            if let Some(tx) = in_flight.get(&cache_key) {
+                (Some(tx.subscribe()), None)
+            } else {
+                let (tx, _) = watch::channel(None);
+                in_flight.insert(cache_key.clone(), tx.clone());
+                (
+                    None,
+                    Some(InFlightGuard {
+                        map: Arc::clone(&self.in_flight),
+                        key: cache_key.clone(),
+                        tx,
+                        completed: false,
+                    }),
+                )
             }
-            break;
+        };
+
+        if let Some(mut rx) = rx_opt {
+            loop {
+                if let Some(res) = rx.borrow().clone() {
+                    let check_now = Self::now_epoch_secs();
+                    self.authorize_peer(Some(peer), check_now)?;
+                    return res;
+                }
+                if rx.changed().await.is_err() {
+                    return Err(Status::cancelled(
+                        "Certificate renewal leader task terminated",
+                    ));
+                }
+            }
         }
 
+        let guard = guard_opt.expect("leader branch must hold InFlightGuard");
         let result = self
             .execute_signed_renewal(signer, peer, node_id, trimmed_csr, &cache_key)
             .await;
-
-        let notify = {
-            let mut in_flight = self.in_flight.lock().await;
-            in_flight.remove(&cache_key)
-        };
-        if let Some(n) = notify {
-            n.notify_waiters();
-        }
-
+        guard.finish(&result);
         result
     }
 
@@ -315,15 +357,19 @@ impl CertRenewalManager {
             return Ok(cached);
         }
 
-        // Enforce rolling per-node burst rate limit
+        // Enforce rolling per-node burst rate limit and prune expired entries
         {
             let mut limits = self.rate_limits.lock().await;
-            let history = limits.entry(node_id.to_string()).or_default();
             let cutoff = now_u64.saturating_sub(self.policy.rate_limit_window_secs);
-            while history.front().is_some_and(|&ts| ts <= cutoff) {
-                history.pop_front();
-            }
-            if history.len() >= self.policy.rate_limit_max_burst {
+            limits.retain(|_, q| {
+                while q.front().is_some_and(|&ts| ts <= cutoff) {
+                    q.pop_front();
+                }
+                !q.is_empty()
+            });
+            let history = limits.get(node_id);
+            if history.is_some_and(|q| q.len() >= self.policy.rate_limit_max_burst) {
+                let history = history.unwrap();
                 let oldest = history.front().copied().unwrap_or(now_u64);
                 let retry_after = oldest.saturating_add(self.policy.rate_limit_window_secs);
                 return Err(Self::status_with_epoch_header(
@@ -367,13 +413,25 @@ impl CertRenewalManager {
 
         {
             let mut cache = self.cache.lock().await;
-            cache.insert(
-                cache_key.clone(),
-                CachedRenewalEntry {
-                    response: response.clone(),
-                    expires_at_epoch_secs: now_u64.saturating_add(self.policy.cache_ttl_secs),
-                },
-            );
+            cache.retain(|_, v| v.expires_at_epoch_secs > now_u64);
+            if self.policy.max_cache_entries > 0 && cache.len() >= self.policy.max_cache_entries {
+                if let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, v)| v.expires_at_epoch_secs)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest_key);
+                }
+            }
+            if self.policy.max_cache_entries > 0 {
+                cache.insert(
+                    cache_key.clone(),
+                    CachedRenewalEntry {
+                        response: response.clone(),
+                        expires_at_epoch_secs: now_u64.saturating_add(self.policy.cache_ttl_secs),
+                    },
+                );
+            }
         }
 
         info!(

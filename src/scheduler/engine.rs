@@ -4031,4 +4031,186 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn test_upgrade_drain_clears_on_target_version_reconnect_while_manual_drain_persists() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .register_node(
+                "u1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .register_node(
+                "u2".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        // u2 is manually drained before upgrade
+        scheduler
+            .drain_nodes(DrainNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["u2".to_string()],
+                drain: true,
+            })
+            .unwrap();
+
+        // Upgrade both with drain_before_upgrade = true
+        scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["u1".to_string(), "u2".to_string()],
+                target_version: "0.2.0".to_string(),
+                drain_before_upgrade: true,
+            })
+            .unwrap();
+
+        // Both reconnect on 0.2.0: u1 auto-undrains; u2 stays drained (manual drain preserved)
+        let r1 = scheduler
+            .register_node(
+                "u1".to_string(),
+                make_test_capabilities(false, false),
+                "0.2.0".to_string(),
+                1100,
+            )
+            .unwrap();
+        scheduler
+            .register_node(
+                "u2".to_string(),
+                make_test_capabilities(false, false),
+                "0.2.0".to_string(),
+                1100,
+            )
+            .unwrap();
+
+        let nodes = scheduler.list_worker_nodes();
+        let n1 = nodes.iter().find(|n| n.node_id == "u1").unwrap();
+        let n2 = nodes.iter().find(|n| n.node_id == "u2").unwrap();
+        assert!(!n1.draining);
+        assert!(n2.draining);
+
+        // u1 can now receive tasks
+        scheduler
+            .submit_task(make_test_task(
+                "t-post-upg",
+                60,
+                false,
+                ExecutionEngine::WasmWasi,
+            ))
+            .unwrap();
+        let s1 = scheduler
+            .sync_node_state("u1", &r1.session_token, &[], 1200)
+            .unwrap();
+        assert_eq!(s1.desired_tasks.len(), 1);
+    }
+
+    #[test]
+    fn test_multi_selector_match_tie_breaker_and_affinity() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "g-alpha".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::from([("tier".to_string(), "prod".to_string())]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "g-beta".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::from([(
+                        "androgrid.io/transport".to_string(),
+                        "wifi".to_string(),
+                    )]),
+                    initial_node_ids: Vec::new(),
+                },
+                1000,
+            )
+            .unwrap();
+
+        let reg = scheduler
+            .register_node_with_labels(
+                "multi-1".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                HashMap::from([("tier".to_string(), "prod".to_string())]),
+                1000,
+            )
+            .unwrap();
+
+        // list_worker_nodes reports lexicographically smallest match ("g-alpha")
+        let info = scheduler.list_worker_nodes();
+        assert_eq!(info[0].node_group, "g-alpha");
+
+        // Both groups count the matching unpinned worker
+        let groups = scheduler.list_node_groups();
+        assert_eq!(groups[0].active_node_count, 1);
+        assert_eq!(groups[1].active_node_count, 1);
+
+        // Task pinned to g-beta still schedules onto multi-1
+        let mut t_beta = make_test_task("t-beta", 60, false, ExecutionEngine::WasmWasi);
+        t_beta.node_group_affinity = "g-beta".to_string();
+        scheduler.submit_task(t_beta).unwrap();
+        let sync = scheduler
+            .sync_node_state("multi-1", &reg.session_token, &[], 1100)
+            .unwrap();
+        assert_eq!(sync.desired_tasks.len(), 1);
+        assert_eq!(sync.desired_tasks[0].task_id, "t-beta");
+    }
+
+    #[test]
+    fn test_drain_group_with_prepinned_unregistered_nodes_vs_explicit_node_ids() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pre-grp".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: vec!["ghost-1".to_string(), "live-1".to_string()],
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .register_node(
+                "live-1".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        // Group drain targets only currently registered members ("live-1")
+        let grp_drain = scheduler
+            .drain_nodes(DrainNodesRequest {
+                node_group: "pre-grp".to_string(),
+                node_ids: Vec::new(),
+                drain: true,
+            })
+            .unwrap();
+        assert_eq!(grp_drain.affected_nodes, 1);
+        assert_eq!(grp_drain.affected_node_ids, vec!["live-1"]);
+
+        // Explicit node_ids drain rejects unregistered "ghost-1" with NodeNotFound
+        assert!(matches!(
+            scheduler.drain_nodes(DrainNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["ghost-1".to_string()],
+                drain: true,
+            }),
+            Err(SchedulingError::NodeNotFound(_))
+        ));
+    }
 }

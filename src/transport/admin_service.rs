@@ -1034,23 +1034,82 @@ mod tests {
         let scheduler = Arc::new(ClusterScheduler::new());
         let svc = AdminServiceImpl::new(Arc::clone(&scheduler));
 
-        // Non-admin peer rejected
-        let mut worker_req = Request::new(CreateNodeGroupRequest {
-            group_id: "rack-1".to_string(),
-            description: String::new(),
-            label_selector: std::collections::HashMap::new(),
-            initial_node_ids: Vec::new(),
-        });
-        worker_req.extensions_mut().insert(AuthenticatedPeer {
+        // Non-admin peer rejected across all NodeGroup / fleet RPCs
+        let worker_peer = AuthenticatedPeer {
             common_name: Some("pixel-1".to_string()),
             organizational_unit: Some("Edge Compute".to_string()),
             not_before_epoch_secs: 0,
             not_after_epoch_secs: i64::MAX,
             leaf_fingerprint_sha256: [0u8; 32],
             spki_der: Vec::new(),
+        };
+        let mut worker_req = Request::new(CreateNodeGroupRequest {
+            group_id: "rack-1".to_string(),
+            description: String::new(),
+            label_selector: std::collections::HashMap::new(),
+            initial_node_ids: Vec::new(),
         });
-        let err = svc.create_node_group(worker_req).await.unwrap_err();
-        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        worker_req.extensions_mut().insert(worker_peer.clone());
+        assert_eq!(
+            svc.create_node_group(worker_req).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut r_upd = Request::new(UpdateNodeGroupRequest {
+            group_id: "rack-1".to_string(),
+            description: None,
+            label_selector: std::collections::HashMap::new(),
+            replace_label_selector: false,
+        });
+        r_upd.extensions_mut().insert(worker_peer.clone());
+        assert_eq!(
+            svc.update_node_group(r_upd).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut r_list = Request::new(ListNodeGroupsRequest {});
+        r_list.extensions_mut().insert(worker_peer.clone());
+        assert_eq!(
+            svc.list_node_groups(r_list).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut r_assign = Request::new(AssignNodesToGroupRequest {
+            group_id: "rack-1".to_string(),
+            node_ids: vec!["pixel-1".to_string()],
+            unassign: false,
+        });
+        r_assign.extensions_mut().insert(worker_peer.clone());
+        assert_eq!(
+            svc.assign_nodes_to_group(r_assign)
+                .await
+                .unwrap_err()
+                .code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut r_drain = Request::new(DrainNodesRequest {
+            node_group: "rack-1".to_string(),
+            node_ids: Vec::new(),
+            drain: true,
+        });
+        r_drain.extensions_mut().insert(worker_peer.clone());
+        assert_eq!(
+            svc.drain_nodes(r_drain).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let mut r_upg = Request::new(UpgradeNodesRequest {
+            node_group: "rack-1".to_string(),
+            node_ids: Vec::new(),
+            target_version: "0.2.0".to_string(),
+            drain_before_upgrade: false,
+        });
+        r_upg.extensions_mut().insert(worker_peer);
+        assert_eq!(
+            svc.upgrade_nodes(r_upg).await.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
 
         // Admin peer creates group
         let mut admin_req = Request::new(CreateNodeGroupRequest {

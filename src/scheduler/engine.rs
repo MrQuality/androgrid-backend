@@ -3770,4 +3770,208 @@ mod tests {
                 .draining
         );
     }
+
+    #[test]
+    fn test_sync_node_state_metered_cellular_hides_desired_client_version() {
+        let scheduler = ClusterScheduler::new();
+        let reg = scheduler
+            .register_node(
+                "dual-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["dual-1".to_string()],
+                target_version: "0.2.0".to_string(),
+                drain_before_upgrade: false,
+            })
+            .unwrap();
+
+        let wifi_sync = scheduler
+            .sync_node_state("dual-1", &reg.session_token, &[], 1100)
+            .unwrap();
+        assert_eq!(wifi_sync.desired_client_version, "0.2.0");
+
+        let _ = scheduler
+            .claim_cellular_task_nominal("dual-1", 90, false, 1200)
+            .unwrap();
+
+        let metered_sync = scheduler
+            .sync_node_state("dual-1", &reg.session_token, &[], 1300)
+            .unwrap();
+        assert_eq!(metered_sync.desired_client_version, "");
+    }
+
+    #[test]
+    fn test_upgrade_nodes_rollback_clears_stale_desired_version() {
+        let scheduler = ClusterScheduler::new();
+        let reg = scheduler
+            .register_node(
+                "rb-1".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["rb-1".to_string()],
+                target_version: "0.2.0".to_string(),
+                drain_before_upgrade: false,
+            })
+            .unwrap();
+
+        let rb = scheduler
+            .upgrade_nodes(UpgradeNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["rb-1".to_string()],
+                target_version: "0.1.0".to_string(),
+                drain_before_upgrade: false,
+            })
+            .unwrap();
+        assert_eq!(rb.targeted_nodes, 0);
+
+        let sync = scheduler
+            .sync_node_state("rb-1", &reg.session_token, &[], 1100)
+            .unwrap();
+        assert_eq!(sync.desired_client_version, "");
+        assert_eq!(scheduler.list_worker_nodes()[0].desired_client_version, "");
+    }
+
+    #[test]
+    fn test_task_group_submit_and_replace_node_group_affinity() {
+        let scheduler = ClusterScheduler::new();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pool-a".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: vec!["w-a".to_string()],
+                },
+                1000,
+            )
+            .unwrap();
+        scheduler
+            .create_node_group(
+                CreateNodeGroupRequest {
+                    group_id: "pool-b".to_string(),
+                    description: String::new(),
+                    label_selector: HashMap::new(),
+                    initial_node_ids: vec!["w-b".to_string()],
+                },
+                1000,
+            )
+            .unwrap();
+
+        let wa = scheduler
+            .register_node(
+                "w-a".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+        let wb = scheduler
+            .register_node(
+                "w-b".to_string(),
+                make_test_capabilities(false, false),
+                "1.0.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        let mut bad_tpl = make_group_template(&"a".repeat(64));
+        bad_tpl.node_group_affinity = "missing-pool".to_string();
+        assert!(matches!(
+            scheduler.submit_task_group(
+                TaskGroupSpec {
+                    group_id: "tg-aff".to_string(),
+                    template: Some(bad_tpl),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1100,
+            ),
+            Err(SchedulingError::NodeGroupNotFound(_))
+        ));
+
+        let mut tpl_a = make_group_template(&"a".repeat(64));
+        tpl_a.node_group_affinity = "pool-a".to_string();
+        scheduler
+            .submit_task_group(
+                TaskGroupSpec {
+                    group_id: "tg-aff".to_string(),
+                    template: Some(tpl_a),
+                    partitions: vec![TaskPartitionSpec::default()],
+                },
+                1200,
+            )
+            .unwrap();
+
+        assert!(scheduler
+            .sync_node_state("w-b", &wb.session_token, &[], 1250)
+            .unwrap()
+            .desired_tasks
+            .is_empty());
+        assert_eq!(
+            scheduler
+                .sync_node_state("w-a", &wa.session_token, &[], 1250)
+                .unwrap()
+                .desired_tasks
+                .len(),
+            1
+        );
+
+        let mut bad_rep = make_group_template(&"b".repeat(64));
+        bad_rep.node_group_affinity = "missing-pool".to_string();
+        assert!(matches!(
+            scheduler.replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "tg-aff".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(bad_rep),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                1300,
+            ),
+            Err(SchedulingError::NodeGroupNotFound(_))
+        ));
+
+        let mut tpl_b = make_group_template(&"b".repeat(64));
+        tpl_b.node_group_affinity = "pool-b".to_string();
+        scheduler
+            .replace_task_group(
+                ReplaceTaskGroupRequest {
+                    group_id: "tg-aff".to_string(),
+                    expected_epoch: Some(1),
+                    template: Some(tpl_b),
+                    partitions: vec![TaskPartitionSpec::default()],
+                    strategy: ReplaceStrategy::Immediate as i32,
+                },
+                1400,
+            )
+            .unwrap();
+
+        assert!(scheduler
+            .sync_node_state("w-a", &wa.session_token, &[], 1450)
+            .unwrap()
+            .desired_tasks
+            .is_empty());
+        assert_eq!(
+            scheduler
+                .sync_node_state("w-b", &wb.session_token, &[], 1450)
+                .unwrap()
+                .desired_tasks
+                .len(),
+            1
+        );
+    }
 }

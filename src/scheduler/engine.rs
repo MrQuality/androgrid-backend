@@ -3874,6 +3874,18 @@ mod tests {
     #[test]
     fn test_upgrade_nodes_rollback_clears_stale_desired_version() {
         let scheduler = ClusterScheduler::new();
+
+        // Empty or whitespace client_version is rejected symmetrically with target_version
+        assert!(matches!(
+            scheduler.register_node(
+                "rb-bad".to_string(),
+                make_test_capabilities(false, false),
+                " ".to_string(),
+                1000,
+            ),
+            Err(SchedulingError::InvalidNodeGroupRequest(_))
+        ));
+
         let reg = scheduler
             .register_node(
                 "rb-1".to_string(),
@@ -3882,20 +3894,37 @@ mod tests {
                 1000,
             )
             .unwrap();
+        scheduler
+            .register_node(
+                "rb-2".to_string(),
+                make_test_capabilities(false, false),
+                "0.1.0".to_string(),
+                1000,
+            )
+            .unwrap();
+
+        // Manually drain rb-2 before upgrade
+        scheduler
+            .drain_nodes(DrainNodesRequest {
+                node_group: String::new(),
+                node_ids: vec!["rb-2".to_string()],
+                drain: true,
+            })
+            .unwrap();
 
         scheduler
             .upgrade_nodes(UpgradeNodesRequest {
                 node_group: String::new(),
-                node_ids: vec!["rb-1".to_string()],
+                node_ids: vec!["rb-1".to_string(), "rb-2".to_string()],
                 target_version: "0.2.0".to_string(),
-                drain_before_upgrade: false,
+                drain_before_upgrade: true,
             })
             .unwrap();
 
         let rb = scheduler
             .upgrade_nodes(UpgradeNodesRequest {
                 node_group: String::new(),
-                node_ids: vec!["rb-1".to_string()],
+                node_ids: vec!["rb-1".to_string(), "rb-2".to_string()],
                 target_version: "0.1.0".to_string(),
                 drain_before_upgrade: false,
             })
@@ -3906,7 +3935,13 @@ mod tests {
             .sync_node_state("rb-1", &reg.session_token, &[], 1100)
             .unwrap();
         assert_eq!(sync.desired_client_version, "");
-        assert_eq!(scheduler.list_worker_nodes()[0].desired_client_version, "");
+
+        let nodes = scheduler.list_worker_nodes();
+        let n1 = nodes.iter().find(|n| n.node_id == "rb-1").unwrap();
+        let n2 = nodes.iter().find(|n| n.node_id == "rb-2").unwrap();
+        assert_eq!(n1.desired_client_version, "");
+        assert!(!n1.draining);
+        assert!(n2.draining);
     }
 
     #[test]

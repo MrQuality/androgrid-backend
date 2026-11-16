@@ -10,12 +10,14 @@ use tonic::{Request, Response, Status};
 use crate::artifact::store::ArtifactStore;
 use crate::proto::androgrid::v1::andro_grid_service_server::AndroGridService;
 use crate::scheduler::ClusterScheduler;
+use crate::transport::renewal::{CertRenewalManager, CertRenewalPolicy};
 use crate::transport::tls::AuthenticatedPeer;
 use crate::validate_frame_bound;
 use crate::{
     ClaimCellularTaskRequest, ClaimCellularTaskResponse, FetchArtifactRequest,
-    FetchArtifactResponse, RegisterNodeRequest, RegisterNodeResponse, SubmitCellularResultRequest,
-    SubmitCellularResultResponse, SyncNodeStateRequest, SyncNodeStateResponse,
+    FetchArtifactResponse, RegisterNodeRequest, RegisterNodeResponse, RenewCertificateRequest,
+    RenewCertificateResponse, SubmitCellularResultRequest, SubmitCellularResultResponse,
+    SyncNodeStateRequest, SyncNodeStateResponse,
 };
 
 /// Production implementation of AndroGridService backed by the cluster scheduler.
@@ -23,6 +25,7 @@ use crate::{
 pub struct AndroGridServiceImpl {
     scheduler: Arc<ClusterScheduler>,
     artifact_store: Arc<ArtifactStore>,
+    renewal_manager: Arc<CertRenewalManager>,
 }
 
 impl AndroGridServiceImpl {
@@ -32,6 +35,7 @@ impl AndroGridServiceImpl {
         Self {
             scheduler,
             artifact_store: Arc::new(ArtifactStore::new()),
+            renewal_manager: Arc::new(CertRenewalManager::new(None, CertRenewalPolicy::default())),
         }
     }
 
@@ -43,6 +47,22 @@ impl AndroGridServiceImpl {
         Self {
             scheduler,
             artifact_store,
+            renewal_manager: Arc::new(CertRenewalManager::new(None, CertRenewalPolicy::default())),
+        }
+    }
+
+    /// Creates a new service instance with shared [`ArtifactStore`] and [`CertRenewalManager`].
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    pub fn with_services(
+        scheduler: Arc<ClusterScheduler>,
+        artifact_store: Arc<ArtifactStore>,
+        renewal_manager: Arc<CertRenewalManager>,
+    ) -> Self {
+        Self {
+            scheduler,
+            artifact_store,
+            renewal_manager,
         }
     }
 
@@ -212,6 +232,22 @@ impl AndroGridService for AndroGridServiceImpl {
             )));
         }
 
+        Ok(Response::new(response))
+    }
+
+    /// Renews an expiring worker mTLS client certificate in-band over TLS 1.3 mTLS.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    async fn renew_certificate(
+        &self,
+        request: Request<RenewCertificateRequest>,
+    ) -> Result<Response<RenewCertificateResponse>, Status> {
+        let peer = request.extensions().get::<AuthenticatedPeer>().cloned();
+        let req = request.into_inner();
+        let response = self
+            .renewal_manager
+            .renew_certificate(peer.as_ref(), &req.csr_pem)
+            .await?;
         Ok(Response::new(response))
     }
 }

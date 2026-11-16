@@ -40,6 +40,23 @@ pub struct ClusterConfig {
     /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
     pub allow_pairing: bool,
 
+    /// Whether in-band mTLS certificate renewal is enabled (default: true).
+    /// Decoupled from `allow_pairing` so operators can disable QR onboarding while allowing renewals.
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    pub allow_cert_renewal: bool,
+
+    /// Server-side renewal window in days before certificate expiration (default: 30).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_window_days: u32,
+
+    /// Minimum remaining CA validity required beyond the renewal window in days (default: 7).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_min_ca_extension_days: u32,
+
+    /// Default validity duration in days for renewed worker certificates (default: 365).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_validity_days: u32,
+
     /// Default lifetime in seconds for newly issued pairing tokens (default: 300s).
     pub pairing_token_ttl_seconds: u32,
 
@@ -79,6 +96,10 @@ impl Default for ClusterConfig {
             tls_server_key_path: None,
             tls_ca_key_path: None,
             allow_pairing: true,
+            allow_cert_renewal: true,
+            cert_renewal_window_days: 30,
+            cert_renewal_min_ca_extension_days: 7,
+            cert_renewal_validity_days: 365,
             pairing_token_ttl_seconds: 300,
             heartbeat_interval_seconds: 2,
             lease_timeout_seconds: 10,
@@ -131,6 +152,34 @@ impl ClusterConfig {
 
         if let Ok(val) = std::env::var("ANDROGRID_ALLOW_PAIRING") {
             config.allow_pairing = !val.eq_ignore_ascii_case("false") && val != "0";
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_ALLOW_CERT_RENEWAL") {
+            config.allow_cert_renewal = !val.eq_ignore_ascii_case("false") && val != "0";
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_WINDOW_DAYS") {
+            config.cert_renewal_window_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_WINDOW_DAYS",
+                    val,
+                })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_MIN_CA_EXTENSION_DAYS") {
+            config.cert_renewal_min_ca_extension_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_MIN_CA_EXTENSION_DAYS",
+                    val,
+                })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS") {
+            config.cert_renewal_validity_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS",
+                    val,
+                })?;
         }
 
         if let Ok(val) = std::env::var("ANDROGRID_PAIRING_TOKEN_TTL_SECS") {

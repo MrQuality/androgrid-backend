@@ -3,6 +3,7 @@
 //! Enforces strict bidirectional cryptographic identity verification.
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001]
 
+use sha2::{Digest, Sha256};
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 use tonic::{Request, Status};
 
@@ -52,9 +53,9 @@ pub fn build_server_bootstrap_tls_config(
 
 /// Tonic request interceptor enforcing that a peer presented a verified client mTLS certificate.
 ///
-/// Verified X.509 Subject identity extracted from the peer's mTLS leaf certificate.
+/// Verified X.509 Subject and validity identity extracted from the peer's mTLS leaf certificate.
 ///
-/// Traces to: [INV-002], [NFR-SEC-001]
+/// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthenticatedPeer {
     /// Subject Common Name (`CN`), bound to `node_id` for worker certificates.
@@ -62,6 +63,14 @@ pub struct AuthenticatedPeer {
     /// Subject Organizational Unit (`OU`), used to distinguish workers (`Edge Compute`)
     /// from operators (`Control Plane`).
     pub organizational_unit: Option<String>,
+    /// Certificate `notBefore` timestamp in Unix epoch seconds.
+    pub not_before_epoch_secs: i64,
+    /// Certificate `notAfter` timestamp in Unix epoch seconds.
+    pub not_after_epoch_secs: i64,
+    /// SHA-256 digest of the DER-encoded leaf certificate.
+    pub leaf_fingerprint_sha256: [u8; 32],
+    /// Canonical DER-encoded `SubjectPublicKeyInfo` (SPKI) bytes.
+    pub spki_der: Vec<u8>,
 }
 
 /// Tonic request interceptor rejecting calls that did not present an mTLS client certificate
@@ -120,9 +129,22 @@ fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
         None => None,
     };
 
+    let mut hasher = Sha256::new();
+    hasher.update(der);
+    let leaf_fingerprint_sha256: [u8; 32] = hasher.finalize().into();
+
+    let validity = cert.validity();
+    let not_before_epoch_secs = validity.not_before.timestamp();
+    let not_after_epoch_secs = validity.not_after.timestamp();
+    let spki_der = cert.public_key().raw.to_vec();
+
     Ok(AuthenticatedPeer {
         common_name,
         organizational_unit,
+        not_before_epoch_secs,
+        not_after_epoch_secs,
+        leaf_fingerprint_sha256,
+        spki_der,
     })
 }
 

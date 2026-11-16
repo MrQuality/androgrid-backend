@@ -45,6 +45,18 @@ pub enum SignerError {
 
     #[error("Certificate signing failed: {0}")]
     SigningFailed(String),
+
+    #[error("Unsupported CSR key algorithm (ECDSA P-256 required): {0}")]
+    UnsupportedKeyAlgorithm(String),
+
+    #[error("CSR must use a newly generated keypair distinct from the current certificate")]
+    KeyRotationRequired,
+
+    #[error("Issuing CA remaining lifetime ({ca_remaining_days}d) is below minimum required ({required_days}d)")]
+    CaLifetimeInsufficient {
+        ca_remaining_days: i64,
+        required_days: i64,
+    },
 }
 
 /// Output payload containing the signed client certificate and Root CA certificate chain.
@@ -66,6 +78,7 @@ pub struct SignedWorkerCert {
 pub struct CaSigner {
     ca_cert_pem: String,
     ca_fingerprint: String,
+    ca_not_after_epoch_secs: i64,
     ca_cert: Certificate,
     ca_key: KeyPair,
 }
@@ -110,9 +123,12 @@ impl CaSigner {
         hasher.update(&ca_cert_der);
         let ca_fingerprint = format!("{:x}", hasher.finalize());
 
+        let ca_not_after_epoch_secs = parsed_ca.validity().not_after.timestamp();
+
         Ok(Self {
             ca_cert_pem: ca_cert_pem.trim().to_string(),
             ca_fingerprint,
+            ca_not_after_epoch_secs,
             ca_cert,
             ca_key,
         })
@@ -147,6 +163,112 @@ impl CaSigner {
     /// Retrieves the PEM string of the Root CA certificate.
     pub fn ca_cert_pem(&self) -> &str {
         &self.ca_cert_pem
+    }
+
+    /// Returns the issuing CA certificate `notAfter` timestamp in Unix epoch seconds.
+    pub fn ca_not_after_epoch_secs(&self) -> i64 {
+        self.ca_not_after_epoch_secs
+    }
+
+    /// Parses a PKCS#10 CSR PEM, enforces ECDSA P-256 (`secp256r1`), and returns its
+    /// canonical DER-encoded `SubjectPublicKeyInfo` (SPKI) bytes.
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    pub fn extract_p256_csr_spki(csr_pem: &str) -> Result<Vec<u8>, SignerError> {
+        use x509_parser::prelude::FromDer;
+
+        let blocks: Vec<pem::Pem> = pem::parse_many(csr_pem)
+            .map_err(|e| SignerError::InvalidCsr(e.to_string()))?
+            .into_iter()
+            .filter(|b| b.tag() == "CERTIFICATE REQUEST" || b.tag() == "NEW CERTIFICATE REQUEST")
+            .collect();
+
+        if blocks.len() != 1 {
+            return Err(SignerError::InvalidCsr(format!(
+                "Expected exactly 1 CERTIFICATE REQUEST PEM block, found {}",
+                blocks.len()
+            )));
+        }
+
+        let (_, csr) =
+            x509_parser::certification_request::X509CertificationRequest::from_der(
+                blocks[0].contents(),
+            )
+            .map_err(|e| SignerError::InvalidCsr(e.to_string()))?;
+
+        let spki = &csr.certification_request_info.subject_pki;
+        let alg_oid = spki.algorithm.algorithm.to_id_string();
+        if alg_oid != "1.2.840.10045.2.1" {
+            return Err(SignerError::UnsupportedKeyAlgorithm(format!(
+                "Expected id-ecPublicKey (1.2.840.10045.2.1), got {alg_oid}"
+            )));
+        }
+
+        let curve_oid = spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|any| any.as_oid().ok())
+            .map(|oid| oid.to_id_string())
+            .ok_or_else(|| {
+                SignerError::UnsupportedKeyAlgorithm(
+                    "ECDSA CSR missing named curve OID parameter".to_string(),
+                )
+            })?;
+
+        if curve_oid != "1.2.840.10045.3.1.7" {
+            return Err(SignerError::UnsupportedKeyAlgorithm(format!(
+                "Expected secp256r1 / P-256 (1.2.840.10045.3.1.7), got {curve_oid}"
+            )));
+        }
+
+        Ok(spki.raw.to_vec())
+    }
+
+    /// Validates an in-band renewal CSR and signs a replacement worker certificate.
+    ///
+    /// Enforces ECDSA P-256, public-key rotation against `current_spki_der`, and
+    /// sufficient remaining CA validity (`min_ca_remaining_days`).
+    ///
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    pub fn sign_worker_renewal_csr(
+        &self,
+        csr_pem: &str,
+        expected_node_id: &str,
+        current_spki_der: &[u8],
+        days_valid: u32,
+        min_ca_remaining_days: u32,
+    ) -> Result<(SignedWorkerCert, u64), SignerError> {
+        let csr_spki = Self::extract_p256_csr_spki(csr_pem)?;
+        if csr_spki == current_spki_der {
+            return Err(SignerError::KeyRotationRequired);
+        }
+
+        let now_secs = OffsetDateTime::now_utc().unix_timestamp();
+        let ca_remaining_secs = self.ca_not_after_epoch_secs - now_secs;
+        let required_secs = i64::from(min_ca_remaining_days) * 86_400;
+        if ca_remaining_secs < required_secs {
+            return Err(SignerError::CaLifetimeInsufficient {
+                ca_remaining_days: ca_remaining_secs.div_euclid(86_400),
+                required_days: i64::from(min_ca_remaining_days),
+            });
+        }
+
+        let effective_days = if now_secs + i64::from(days_valid) * 86_400 > self.ca_not_after_epoch_secs {
+            let max_days = (ca_remaining_secs / 86_400).max(1) as u32;
+            max_days.min(days_valid)
+        } else {
+            days_valid
+        };
+
+        let signed = self.sign_worker_csr_with_days(csr_pem, expected_node_id, effective_days)?;
+        let leaf_der = parse_single_cert_der(&signed.client_cert_pem)?;
+        let (_, parsed_leaf) = x509_parser::parse_x509_certificate(&leaf_der)
+            .map_err(|e| SignerError::SigningFailed(e.to_string()))?;
+        let not_after_epoch_secs = u64::try_from(parsed_leaf.validity().not_after.timestamp())
+            .map_err(|_| SignerError::SigningFailed("Negative certificate notAfter".to_string()))?;
+
+        Ok((signed, not_after_epoch_secs))
     }
 
     /// Validates an incoming PKCS#10 CSR and signs a new worker client certificate.

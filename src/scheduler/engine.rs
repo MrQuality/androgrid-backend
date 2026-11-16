@@ -384,6 +384,11 @@ impl ClusterScheduler {
         }
 
         // Find candidate pending task matching cellular constraints
+        let worker_effective_labels = if worker_snapshot.explicit_node_group.is_none() {
+            Some(worker_snapshot.effective_labels())
+        } else {
+            None
+        };
         let mut candidate_id: Option<String> = None;
         for (id, record) in inner.tasks.iter() {
             if record.state != TaskState::Pending {
@@ -413,6 +418,7 @@ impl ClusterScheduler {
                 && !is_worker_in_node_group(
                     &inner.node_groups,
                     &worker_snapshot,
+                    worker_effective_labels.as_ref(),
                     &record.spec.node_group_affinity,
                 )
             {
@@ -604,6 +610,11 @@ impl ClusterScheduler {
         let inner_ref = &mut *inner;
 
         if is_unmetered && !is_throttled && !is_draining {
+            let worker_effective_labels = if worker_snapshot.explicit_node_group.is_none() {
+                Some(worker_snapshot.effective_labels())
+            } else {
+                None
+            };
             // First priority: dispatch any pending unassigned tasks
             for record in inner_ref.tasks.values_mut() {
                 if record.state == TaskState::Pending {
@@ -616,6 +627,7 @@ impl ClusterScheduler {
                         && !is_worker_in_node_group(
                             &inner_ref.node_groups,
                             &worker_snapshot,
+                            worker_effective_labels.as_ref(),
                             &record.spec.node_group_affinity,
                         )
                     {
@@ -653,6 +665,7 @@ impl ClusterScheduler {
                             && !is_worker_in_node_group(
                                 &inner_ref.node_groups,
                                 &worker_snapshot,
+                                worker_effective_labels.as_ref(),
                                 &record.spec.node_group_affinity,
                             )
                         {
@@ -1200,15 +1213,6 @@ impl ClusterScheduler {
         if inner.groups.contains_key(&group.group_id) {
             return Err(SchedulingError::GroupAlreadyExists(group.group_id));
         }
-        if !template.node_group_affinity.is_empty()
-            && !inner
-                .node_groups
-                .contains_key(&template.node_group_affinity)
-        {
-            return Err(SchedulingError::NodeGroupNotFound(
-                template.node_group_affinity.clone(),
-            ));
-        }
 
         let epoch = 1u64;
         let total = group.partitions.len();
@@ -1640,8 +1644,12 @@ impl ClusterScheduler {
             created_at_epoch_ms: now_epoch_ms,
             updated_at_epoch_ms: now_epoch_ms,
         };
-        let proto_group = build_node_group_proto(&record, &inner.node_groups, &inner.workers);
         inner.node_groups.insert(req.group_id.clone(), record);
+        let inserted = inner
+            .node_groups
+            .get(&req.group_id)
+            .expect("inserted above");
+        let proto_group = build_node_group_proto(inserted, &inner.workers);
 
         Ok(CreateNodeGroupResponse {
             created: true,
@@ -1698,7 +1706,7 @@ impl ClusterScheduler {
             .node_groups
             .get(&req.group_id)
             .expect("verified above");
-        let proto_group = build_node_group_proto(record, &inner.node_groups, &inner.workers);
+        let proto_group = build_node_group_proto(record, &inner.workers);
         Ok(UpdateNodeGroupResponse {
             updated: true,
             group: Some(proto_group),
@@ -1714,7 +1722,7 @@ impl ClusterScheduler {
         let mut out: Vec<NodeGroup> = inner
             .node_groups
             .values()
-            .map(|rec| build_node_group_proto(rec, &inner.node_groups, &inner.workers))
+            .map(|rec| build_node_group_proto(rec, &inner.workers))
             .collect();
         out.sort_by(|a, b| a.group_id.cmp(&b.group_id));
         out
@@ -1800,7 +1808,7 @@ impl ClusterScheduler {
             .node_groups
             .get(&req.group_id)
             .expect("verified above");
-        let proto_group = build_node_group_proto(record, &inner.node_groups, &inner.workers);
+        let proto_group = build_node_group_proto(record, &inner.workers);
         Ok(AssignNodesToGroupResponse {
             success: true,
             group_id: req.group_id.clone(),
@@ -1849,9 +1857,12 @@ impl ClusterScheduler {
         req: UpgradeNodesRequest,
     ) -> Result<UpgradeNodesResponse, SchedulingError> {
         let target_version = req.target_version.trim().to_string();
-        if target_version.is_empty() {
+        if target_version.is_empty()
+            || target_version.len() > 128
+            || !target_version.bytes().all(|b| (0x21..=0x7E).contains(&b))
+        {
             return Err(SchedulingError::InvalidNodeGroupRequest(
-                "target_version must not be empty".to_string(),
+                "target_version must be 1..=128 printable non-whitespace ASCII chars".to_string(),
             ));
         }
 
@@ -2159,9 +2170,10 @@ fn validate_node_id_batch(
     let mut seen = BTreeSet::new();
     let mut out = Vec::with_capacity(node_ids.len());
     for nid in node_ids {
-        if nid.trim().is_empty() {
+        if nid.is_empty() || nid.len() > 128 || !nid.bytes().all(|b| (0x21..=0x7E).contains(&b)) {
             return Err(SchedulingError::InvalidNodeGroupRequest(
-                "node_ids must not contain empty elements".to_string(),
+                "node_ids elements must be 1..=128 printable non-whitespace ASCII chars"
+                    .to_string(),
             ));
         }
         if seen.insert(nid.clone()) {
@@ -2174,6 +2186,7 @@ fn validate_node_id_batch(
 fn is_worker_in_node_group(
     node_groups: &HashMap<String, NodeGroupRecord>,
     worker: &WorkerRecord,
+    cached_effective_labels: Option<&BTreeMap<String, String>>,
     group_id: &str,
 ) -> bool {
     if let Some(ref explicit) = worker.explicit_node_group {
@@ -2185,7 +2198,14 @@ fn is_worker_in_node_group(
     if group.label_selector.is_empty() {
         return false;
     }
-    let effective = worker.effective_labels();
+    let owned_labels;
+    let effective = match cached_effective_labels {
+        Some(labels) => labels,
+        None => {
+            owned_labels = worker.effective_labels();
+            &owned_labels
+        }
+    };
     group
         .label_selector
         .iter()
@@ -2216,7 +2236,6 @@ fn resolve_effective_node_group(
 
 fn build_node_group_proto(
     record: &NodeGroupRecord,
-    all_groups: &HashMap<String, NodeGroupRecord>,
     workers: &HashMap<String, WorkerRecord>,
 ) -> NodeGroup {
     let active_node_count = workers
@@ -2231,7 +2250,6 @@ fn build_node_group_proto(
                     .iter()
                     .all(|(k, v)| effective.get(k) == Some(v))
             } else {
-                let _ = all_groups;
                 false
             }
         })
@@ -2272,7 +2290,7 @@ fn resolve_target_node_ids(
         let mut matched: Vec<String> = inner
             .workers
             .iter()
-            .filter(|(_, w)| is_worker_in_node_group(&inner.node_groups, w, node_group))
+            .filter(|(_, w)| is_worker_in_node_group(&inner.node_groups, w, None, node_group))
             .map(|(nid, _)| nid.clone())
             .collect();
         matched.sort();

@@ -16,8 +16,9 @@ use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
 use androgrid_backend::{
     build_server_bootstrap_tls_config, require_client_mtls_interceptor, AdminServiceImpl,
-    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, ClusterConfig, ClusterScheduler,
-    EnrollmentContext, EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
+    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, CertRenewalManager,
+    CertRenewalPolicy, ClusterConfig, ClusterScheduler, EnrollmentContext, EnrollmentServiceImpl,
+    PairingTokenStore, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]
@@ -99,20 +100,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (Some(Arc::new(signer)), fp)
                 }
                 Err(e) => {
-                    if config.allow_pairing {
+                    if config.allow_pairing || config.allow_cert_renewal {
                         return Err(format!(
                             "Failed to initialize Root CA signer from {}: {e}. \
-                             Ensure CA private key is PKCS#8 PEM (openssl genpkey) or disable pairing.",
+                             Ensure CA private key is PKCS#8 PEM (openssl genpkey) or disable pairing and cert renewal.",
                             ca_key_path.display()
                         )
                         .into());
                     }
-                    warn!(error = %e, "Failed to initialize Root CA signer; enrollment disabled");
+                    warn!(error = %e, "Failed to initialize Root CA signer; enrollment and renewal disabled");
                     (None, String::new())
                 }
             },
             (Err(e), _) | (_, Err(e)) => {
-                if config.allow_pairing {
+                if config.allow_pairing || config.allow_cert_renewal {
                     return Err(format!(
                         "Could not read Root CA cert ({}) or key ({}): {e}",
                         ca_cert_path.display(),
@@ -120,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .into());
                 }
-                warn!(error = %e, "Could not read Root CA cert or key; enrollment disabled");
+                warn!(error = %e, "Could not read Root CA cert or key; enrollment and renewal disabled");
                 (None, String::new())
             }
         }
@@ -135,9 +136,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mtls_enabled = config.is_mtls_configured();
     let mtls_guard = ConditionalMtlsInterceptor { mtls_enabled };
-    let service = AndroGridServiceImpl::with_artifact_store(
+    let renewal_manager = Arc::new(CertRenewalManager::new(
+        ca_signer.clone(),
+        CertRenewalPolicy {
+            allow_cert_renewal: config.allow_cert_renewal,
+            renewal_window_days: config.cert_renewal_window_days,
+            min_ca_extension_days: config.cert_renewal_min_ca_extension_days,
+            issued_validity_days: config.cert_renewal_validity_days,
+            ..CertRenewalPolicy::default()
+        },
+    ));
+    let service = AndroGridServiceImpl::with_services(
         Arc::clone(&scheduler),
         Arc::clone(&artifact_store),
+        Arc::clone(&renewal_manager),
     );
     let service_server = tonic::codegen::InterceptedService::new(
         AndroGridServiceServer::new(service)

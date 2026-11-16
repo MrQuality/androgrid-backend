@@ -26,6 +26,10 @@ service AndroGridService {
   // Content-addressed WASM artifact retrieval over the authenticated mTLS 1.3 channel.
   // Traces to: [INV-002], [NFR-PERF-001], [NFR-POW-001], [REQ-OP-003]
   rpc FetchArtifact(FetchArtifactRequest) returns (FetchArtifactResponse);
+
+  // Renews an expiring worker mTLS client certificate over the authenticated mTLS 1.3 channel.
+  // Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+  rpc RenewCertificate(RenewCertificateRequest) returns (RenewCertificateResponse);
 }
 
 // AdminService provides administrative control, task submission, and cluster observability
@@ -524,6 +528,25 @@ message ListTaskGroupsRequest {
 // Response containing TaskGroup summaries.
 message ListTaskGroupsResponse {
   repeated TaskGroupSummary groups = 1;
+}
+
+// Request to renew an expiring worker mTLS client certificate in-band.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+message RenewCertificateRequest {
+  // PEM-encoded PKCS#10 CSR signed by the worker's newly generated ECDSA P-256 keypair.
+  // Subject CN MUST match the authenticated mTLS peer's CN (node_id).
+  string csr_pem = 1;
+}
+
+// Response containing the newly signed mTLS client certificate.
+// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+message RenewCertificateResponse {
+  // PEM-encoded X.509 client certificate signed by the cluster CA.
+  string client_cert_pem = 1;
+  // PEM-encoded issuing CA certificate chain (informational; v1 client retains enrolled trust anchor).
+  string ca_cert_pem = 2;
+  // Server-authoritative expiration timestamp (Unix epoch seconds).
+  uint64 not_after_epoch_seconds = 3;
 }
 
 

@@ -15,6 +15,8 @@ pub enum ConfigError {
     InvalidSocketAddr { var: &'static str, val: String },
     #[error("Invalid integer value in {var}: {val}")]
     InvalidInteger { var: &'static str, val: String },
+    #[error("Invalid certificate renewal policy: {0}")]
+    InvalidRenewalPolicy(String),
 }
 
 /// Orchestrator host control plane configuration settings.
@@ -39,6 +41,23 @@ pub struct ClusterConfig {
     /// Whether ephemeral device pairing and bootstrap enrollment are enabled (default: true).
     /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-001]
     pub allow_pairing: bool,
+
+    /// Whether in-band mTLS certificate renewal is enabled (default: true).
+    /// Decoupled from `allow_pairing` so operators can disable QR onboarding while allowing renewals.
+    /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
+    pub allow_cert_renewal: bool,
+
+    /// Server-side renewal window in days before certificate expiration (default: 30).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_window_days: u32,
+
+    /// Minimum remaining CA validity required beyond the renewal window in days (default: 7).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_min_ca_extension_days: u32,
+
+    /// Default validity duration in days for renewed worker certificates (default: 365).
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub cert_renewal_validity_days: u32,
 
     /// Default lifetime in seconds for newly issued pairing tokens (default: 300s).
     pub pairing_token_ttl_seconds: u32,
@@ -79,6 +98,10 @@ impl Default for ClusterConfig {
             tls_server_key_path: None,
             tls_ca_key_path: None,
             allow_pairing: true,
+            allow_cert_renewal: true,
+            cert_renewal_window_days: 30,
+            cert_renewal_min_ca_extension_days: 7,
+            cert_renewal_validity_days: 365,
             pairing_token_ttl_seconds: 300,
             heartbeat_interval_seconds: 2,
             lease_timeout_seconds: 10,
@@ -133,6 +156,34 @@ impl ClusterConfig {
             config.allow_pairing = !val.eq_ignore_ascii_case("false") && val != "0";
         }
 
+        if let Ok(val) = std::env::var("ANDROGRID_ALLOW_CERT_RENEWAL") {
+            config.allow_cert_renewal = !val.eq_ignore_ascii_case("false") && val != "0";
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_WINDOW_DAYS") {
+            config.cert_renewal_window_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_WINDOW_DAYS",
+                    val,
+                })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_MIN_CA_EXTENSION_DAYS") {
+            config.cert_renewal_min_ca_extension_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_MIN_CA_EXTENSION_DAYS",
+                    val,
+                })?;
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS") {
+            config.cert_renewal_validity_days =
+                val.parse().map_err(|_| ConfigError::InvalidInteger {
+                    var: "ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS",
+                    val,
+                })?;
+        }
+
         if let Ok(val) = std::env::var("ANDROGRID_PAIRING_TOKEN_TTL_SECS") {
             config.pairing_token_ttl_seconds =
                 val.parse().map_err(|_| ConfigError::InvalidInteger {
@@ -177,7 +228,26 @@ impl ClusterConfig {
             config.artifact_storage_dir = Some(PathBuf::from(val));
         }
 
+        config.validate_renewal_policy()?;
         Ok(config)
+    }
+
+    /// Validates certificate renewal configuration bounds.
+    ///
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub fn validate_renewal_policy(&self) -> Result<(), ConfigError> {
+        if self.cert_renewal_validity_days == 0 {
+            return Err(ConfigError::InvalidRenewalPolicy(
+                "ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS must be greater than 0".to_string(),
+            ));
+        }
+        if self.cert_renewal_window_days >= self.cert_renewal_validity_days {
+            return Err(ConfigError::InvalidRenewalPolicy(format!(
+                "ANDROGRID_CERT_RENEWAL_WINDOW_DAYS ({}) must be strictly less than ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS ({})",
+                self.cert_renewal_window_days, self.cert_renewal_validity_days
+            )));
+        }
+        Ok(())
     }
 
     /// Resolves the base URL for worker artifact downloads.

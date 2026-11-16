@@ -878,6 +878,10 @@ mod tests {
         worker_req.extensions_mut().insert(AuthenticatedPeer {
             common_name: Some("worker-01".to_string()),
             organizational_unit: Some("Worker".to_string()),
+            not_before_epoch_secs: 0,
+            not_after_epoch_secs: i64::MAX,
+            leaf_fingerprint_sha256: [0u8; 32],
+            spki_der: Vec::new(),
         });
         let authz_err = svc
             .list_task_groups(worker_req)
@@ -903,6 +907,10 @@ mod tests {
         admin_req.extensions_mut().insert(AuthenticatedPeer {
             common_name: Some("ops".to_string()),
             organizational_unit: Some("Control Plane".to_string()),
+            not_before_epoch_secs: 0,
+            not_after_epoch_secs: i64::MAX,
+            leaf_fingerprint_sha256: [0u8; 32],
+            spki_der: Vec::new(),
         });
         let sub_res = svc.submit_task_group(admin_req).await.unwrap().into_inner();
         assert!(sub_res.accepted);

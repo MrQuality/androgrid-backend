@@ -290,6 +290,14 @@ fn spike_tonic_service_trait_definition_presence() {
         {
             Err(tonic::Status::not_found("Not found"))
         }
+
+        async fn renew_certificate(
+            &self,
+            _request: tonic::Request<androgrid_backend::RenewCertificateRequest>,
+        ) -> Result<tonic::Response<androgrid_backend::RenewCertificateResponse>, tonic::Status>
+        {
+            Err(tonic::Status::unimplemented("MockService"))
+        }
     }
 
     let service = MockService;

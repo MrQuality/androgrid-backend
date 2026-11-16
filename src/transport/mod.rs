@@ -4,10 +4,14 @@
 
 pub mod admin_service;
 pub mod error;
+pub mod renewal;
 pub mod service;
 pub mod tls;
 
 pub use admin_service::AdminServiceImpl;
+pub use renewal::{
+    CertRenewalManager, CertRenewalPolicy, HEADER_NEXT_RENEWAL_EPOCH, HEADER_RETRY_AFTER_EPOCH,
+};
 pub use service::AndroGridServiceImpl;
 pub use tls::{
     build_client_mtls_config, build_server_bootstrap_tls_config, build_server_mtls_config,

@@ -1273,7 +1273,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("  (No worker nodes currently registered)");
                 } else {
                     println!(
-                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
+                        "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9}",
                         "NODE ID",
                         "CORES",
                         "RAM (MB)",
@@ -1282,17 +1282,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         "ROOTED",
                         "TEMP (°C)",
                         "THERMAL",
-                        "TRANSPORT"
+                        "TRANSPORT",
+                        "NODE GROUP",
+                        "DRAINING"
                     );
-                    println!("{}", "-".repeat(108));
+                    println!("{}", "-".repeat(134));
                     for n in node_outputs {
                         let temp_str = if n.battery_temperature_celsius <= 0 {
                             "N/A".to_string()
                         } else {
                             format!("{}°C", n.battery_temperature_celsius)
                         };
+                        let group_str = if n.node_group.is_empty() {
+                            "-".to_string()
+                        } else {
+                            n.node_group
+                        };
                         println!(
-                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14}",
+                            "{:<20} {:<6} {:<10} {:<12} {:<12} {:<8} {:<10} {:<10} {:<14} {:<16} {:<9}",
                             n.node_id,
                             n.cpu_cores,
                             n.ram_mb,
@@ -1301,7 +1308,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if n.is_rooted { "YES" } else { "NO" },
                             temp_str,
                             n.thermal_status,
-                            n.transport
+                            n.transport,
+                            group_str,
+                            if n.draining { "YES" } else { "NO" }
                         );
                     }
                 }

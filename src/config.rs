@@ -15,6 +15,8 @@ pub enum ConfigError {
     InvalidSocketAddr { var: &'static str, val: String },
     #[error("Invalid integer value in {var}: {val}")]
     InvalidInteger { var: &'static str, val: String },
+    #[error("Invalid certificate renewal policy: {0}")]
+    InvalidRenewalPolicy(String),
 }
 
 /// Orchestrator host control plane configuration settings.
@@ -226,7 +228,26 @@ impl ClusterConfig {
             config.artifact_storage_dir = Some(PathBuf::from(val));
         }
 
+        config.validate_renewal_policy()?;
         Ok(config)
+    }
+
+    /// Validates certificate renewal configuration bounds.
+    ///
+    /// Traces to: [INV-002], [REQ-OP-005]
+    pub fn validate_renewal_policy(&self) -> Result<(), ConfigError> {
+        if self.cert_renewal_validity_days == 0 {
+            return Err(ConfigError::InvalidRenewalPolicy(
+                "ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS must be greater than 0".to_string(),
+            ));
+        }
+        if self.cert_renewal_window_days >= self.cert_renewal_validity_days {
+            return Err(ConfigError::InvalidRenewalPolicy(format!(
+                "ANDROGRID_CERT_RENEWAL_WINDOW_DAYS ({}) must be strictly less than ANDROGRID_CERT_RENEWAL_VALIDITY_DAYS ({})",
+                self.cert_renewal_window_days, self.cert_renewal_validity_days
+            )));
+        }
+        Ok(())
     }
 
     /// Resolves the base URL for worker artifact downloads.

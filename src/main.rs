@@ -100,20 +100,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     (Some(Arc::new(signer)), fp)
                 }
                 Err(e) => {
-                    if config.allow_pairing {
+                    if config.allow_pairing || config.allow_cert_renewal {
                         return Err(format!(
                             "Failed to initialize Root CA signer from {}: {e}. \
-                             Ensure CA private key is PKCS#8 PEM (openssl genpkey) or disable pairing.",
+                             Ensure CA private key is PKCS#8 PEM (openssl genpkey) or disable pairing and cert renewal.",
                             ca_key_path.display()
                         )
                         .into());
                     }
-                    warn!(error = %e, "Failed to initialize Root CA signer; enrollment disabled");
+                    warn!(error = %e, "Failed to initialize Root CA signer; enrollment and renewal disabled");
                     (None, String::new())
                 }
             },
             (Err(e), _) | (_, Err(e)) => {
-                if config.allow_pairing {
+                if config.allow_pairing || config.allow_cert_renewal {
                     return Err(format!(
                         "Could not read Root CA cert ({}) or key ({}): {e}",
                         ca_cert_path.display(),
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     )
                     .into());
                 }
-                warn!(error = %e, "Could not read Root CA cert or key; enrollment disabled");
+                warn!(error = %e, "Could not read Root CA cert or key; enrollment and renewal disabled");
                 (None, String::new())
             }
         }

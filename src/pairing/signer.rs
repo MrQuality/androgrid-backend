@@ -170,12 +170,16 @@ impl CaSigner {
         self.ca_not_after_epoch_secs
     }
 
-    /// Parses a PKCS#10 CSR PEM, enforces ECDSA P-256 (`secp256r1`), and returns its
-    /// canonical DER-encoded `SubjectPublicKeyInfo` (SPKI) bytes.
+    /// Parses a PKCS#10 CSR PEM, verifies its Proof-of-Possession signature, enforces
+    /// ECDSA P-256 (`secp256r1`), and returns its canonical DER-encoded `SubjectPublicKeyInfo` (SPKI) bytes.
     ///
     /// Traces to: [INV-002], [NFR-SEC-001], [REQ-OP-005]
     pub fn extract_p256_csr_spki(csr_pem: &str) -> Result<Vec<u8>, SignerError> {
         use x509_parser::prelude::FromDer;
+
+        // Verify CSR Proof-of-Possession signature first via rcgen
+        CertificateSigningRequestParams::from_pem(csr_pem)
+            .map_err(|e| SignerError::InvalidCsr(e.to_string()))?;
 
         let blocks: Vec<pem::Pem> = pem::parse_many(csr_pem)
             .map_err(|e| SignerError::InvalidCsr(e.to_string()))?
@@ -246,17 +250,23 @@ impl CaSigner {
         let now_secs = OffsetDateTime::now_utc().unix_timestamp();
         let ca_remaining_secs = self.ca_not_after_epoch_secs - now_secs;
         let required_secs = i64::from(min_ca_remaining_days) * 86_400;
-        if ca_remaining_secs < required_secs {
+        if ca_remaining_secs < required_secs || ca_remaining_secs <= 0 {
             return Err(SignerError::CaLifetimeInsufficient {
                 ca_remaining_days: ca_remaining_secs.div_euclid(86_400),
-                required_days: i64::from(min_ca_remaining_days),
+                required_days: i64::from(min_ca_remaining_days).max(1),
             });
         }
 
         let effective_days =
             if now_secs + i64::from(days_valid) * 86_400 > self.ca_not_after_epoch_secs {
-                let max_days = (ca_remaining_secs / 86_400).max(1) as u32;
-                max_days.min(days_valid)
+                let max_days = ca_remaining_secs / 86_400;
+                if max_days == 0 {
+                    return Err(SignerError::CaLifetimeInsufficient {
+                        ca_remaining_days: 0,
+                        required_days: i64::from(min_ca_remaining_days).max(1),
+                    });
+                }
+                (max_days as u32).min(days_valid)
             } else {
                 days_valid
             };

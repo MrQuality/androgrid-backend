@@ -3,9 +3,23 @@
 //! Enforces strict bidirectional cryptographic identity verification.
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001]
 
+use std::future::Future;
+use std::io::Cursor;
+use std::sync::Arc;
+
+use axum::Router;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperAutoBuilder;
+use hyper_util::service::TowerToHyperService;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig};
 use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use tokio_rustls::TlsAcceptor;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 use tonic::{Request, Status};
+use tower::ServiceExt;
 
 /// Constructs a ServerTlsConfig that enforces TLS 1.3 mutual authentication (mTLS).
 ///
@@ -81,6 +95,9 @@ pub struct AuthenticatedPeer {
 ///
 /// Traces to: [INV-002], [NFR-SEC-001]
 pub fn require_client_mtls_interceptor(mut request: Request<()>) -> Result<Request<()>, Status> {
+    if request.extensions().get::<AuthenticatedPeer>().is_some() {
+        return Ok(request);
+    }
     let peer = match request.peer_certs() {
         Some(certs) if !certs.is_empty() => parse_leaf_identity(certs[0].as_ref())?,
         _ => {
@@ -93,7 +110,8 @@ pub fn require_client_mtls_interceptor(mut request: Request<()>) -> Result<Reque
     Ok(request)
 }
 
-fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
+/// Parses a DER-encoded X.509 leaf certificate into [`AuthenticatedPeer`].
+pub fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
     let (_, cert) = x509_parser::parse_x509_certificate(der)
         .map_err(|e| Status::unauthenticated(format!("Invalid client X.509 certificate: {e}")))?;
 
@@ -170,4 +188,103 @@ pub fn build_client_mtls_config(
         .domain_name(domain_name)
         .identity(identity)
         .ca_certificate(server_ca)
+}
+
+/// Constructs a `rustls::ServerConfig` for dual-plane TLS 1.3 serving both gRPC and REST.
+///
+/// Mirrors [`build_server_bootstrap_tls_config`] by enabling `allow_unauthenticated()` so
+/// `EnrollmentService` remains reachable during bootstrap while verified client leaf certificates
+/// are parsed once per connection into [`AuthenticatedPeer`].
+///
+/// Traces to: [INV-002], [NFR-SEC-001], ADR-008
+pub fn build_bootstrap_rustls_server_config(
+    server_cert_pem: &[u8],
+    server_key_pem: &[u8],
+    client_ca_pem: &[u8],
+) -> Result<ServerConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut cert_reader = Cursor::new(server_cert_pem);
+    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut key_reader = Cursor::new(server_key_pem);
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or("No private key found in server key PEM")?;
+
+    let mut ca_reader = Cursor::new(client_ca_pem);
+    let mut roots = RootCertStore::empty();
+    for ca in rustls_pemfile::certs(&mut ca_reader) {
+        roots.add(ca?)?;
+    }
+
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
+        .build()?;
+
+    let mut cfg = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)?;
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(cfg)
+}
+
+/// Serves a combined Tonic gRPC + Axum REST `Router` over TLS 1.3 mTLS on `listener`.
+///
+/// Parses the peer's leaf X.509 certificate once per accepted TLS stream into
+/// `Option<AuthenticatedPeer>` and injects it into every HTTP request's `Extensions`.
+///
+/// Traces to: [INV-002], [NFR-SEC-001], ADR-008
+pub async fn serve_dual_plane_tls<F>(
+    listener: TcpListener,
+    tls_config: ServerConfig,
+    router: Router,
+    shutdown: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                break;
+            }
+            accept_res = listener.accept() => {
+                let (tcp_stream, _remote_addr) = match accept_res {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                let acceptor = acceptor.clone();
+                let router = router.clone();
+                tokio::spawn(async move {
+                    let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
+                        return;
+                    };
+                    let peer: Option<AuthenticatedPeer> = tls_stream
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(|certs| certs.first())
+                        .and_then(|leaf| parse_leaf_identity(leaf.as_ref()).ok());
+
+                    let svc = tower::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        let router = router.clone();
+                        let peer = peer.clone();
+                        async move {
+                            if let Some(p) = peer {
+                                req.extensions_mut().insert(p);
+                            }
+                            router.oneshot(req).await
+                        }
+                    });
+
+                    let _ = HyperAutoBuilder::new(TokioExecutor::new())
+                        .serve_connection(TokioIo::new(tls_stream), TowerToHyperService::new(svc))
+                        .await;
+                });
+            }
+        }
+    }
 }

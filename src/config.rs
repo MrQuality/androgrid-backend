@@ -85,6 +85,10 @@ pub struct ClusterConfig {
 
     /// Optional persistent directory on disk for cached WebAssembly artifacts.
     pub artifact_storage_dir: Option<PathBuf>,
+
+    /// Maximum allowed byte length for uploaded APK artifacts (default: 128 MB).
+    /// Traces to: [NFR-PERF-001]
+    pub max_apk_bytes: usize,
 }
 
 impl Default for ClusterConfig {
@@ -112,6 +116,7 @@ impl Default for ClusterConfig {
                 .expect("Default artifact socket address must be valid"),
             artifact_base_url: None,
             artifact_storage_dir: None,
+            max_apk_bytes: 128 * 1024 * 1024,
         }
     }
 }
@@ -226,6 +231,13 @@ impl ClusterConfig {
 
         if let Ok(val) = std::env::var("ANDROGRID_ARTIFACT_DIR") {
             config.artifact_storage_dir = Some(PathBuf::from(val));
+        }
+
+        if let Ok(val) = std::env::var("ANDROGRID_MAX_APK_BYTES") {
+            config.max_apk_bytes = val.parse::<usize>().map_err(|_| ConfigError::InvalidInteger {
+                var: "ANDROGRID_MAX_APK_BYTES",
+                val,
+            })?;
         }
 
         config.validate_renewal_policy()?;

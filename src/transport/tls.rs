@@ -282,6 +282,7 @@ pub async fn serve_dual_plane_tls_with_limits<F>(
 {
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
     let conn_limit = Arc::new(Semaphore::new(max_connections.max(1)));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut active_tasks = JoinSet::new();
     tokio::pin!(shutdown);
 
@@ -303,6 +304,7 @@ pub async fn serve_dual_plane_tls_with_limits<F>(
                 };
                 let acceptor = acceptor.clone();
                 let router = router.clone();
+                let mut conn_shutdown_rx = shutdown_rx.clone();
                 active_tasks.spawn(async move {
                     let _permit = permit;
                     let tls_stream = match tokio::time::timeout(handshake_timeout, acceptor.accept(tcp_stream)).await {
@@ -340,14 +342,25 @@ pub async fn serve_dual_plane_tls_with_limits<F>(
                         }
                     });
 
-                    let _ = HyperAutoBuilder::new(TokioExecutor::new())
-                        .serve_connection(TokioIo::new(tls_stream), TowerToHyperService::new(svc))
-                        .await;
+                    let builder = HyperAutoBuilder::new(TokioExecutor::new());
+                    let conn = builder.serve_connection(
+                        TokioIo::new(tls_stream),
+                        TowerToHyperService::new(svc),
+                    );
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        _ = &mut conn => {}
+                        _ = conn_shutdown_rx.changed() => {
+                            conn.as_mut().graceful_shutdown();
+                            let _ = conn.await;
+                        }
+                    }
                 });
             }
         }
     }
 
+    let _ = shutdown_tx.send(true);
     if !active_tasks.is_empty() {
         let _ = tokio::time::timeout(drain_timeout, async {
             while active_tasks.join_next().await.is_some() {}

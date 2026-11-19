@@ -205,8 +205,8 @@ pub fn build_bootstrap_rustls_server_config(
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let mut cert_reader = Cursor::new(server_cert_pem);
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
 
     let mut key_reader = Cursor::new(server_key_pem);
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)?

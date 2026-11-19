@@ -135,7 +135,10 @@ impl ArtifactServer {
 
     async fn handle_blob_put(State(state): State<BlobServerState>, req: AxumRequest) -> Response {
         let Some(peer) = req.extensions().get::<AuthenticatedPeer>().cloned() else {
-            return (StatusCode::UNAUTHORIZED, "Client mTLS certificate required [INV-002]")
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Client mTLS certificate required [INV-002]",
+            )
                 .into_response();
         };
         if peer.organizational_unit.as_deref() != Some("Control Plane") {
@@ -151,10 +154,7 @@ impl ArtifactServer {
         }
 
         let headers = req.headers();
-        let kind = match headers
-            .get("x-artifact-kind")
-            .and_then(|v| v.to_str().ok())
-        {
+        let kind = match headers.get("x-artifact-kind").and_then(|v| v.to_str().ok()) {
             Some(raw) => match BlobKind::parse_header(raw) {
                 Some(k) => k,
                 None => {
@@ -208,13 +208,18 @@ impl ArtifactServer {
             };
             total_bytes = match total_bytes.checked_add(chunk.len()) {
                 Some(n) => n,
-                None => return (StatusCode::PAYLOAD_TOO_LARGE, "Payload size overflow").into_response(),
+                None => {
+                    return (StatusCode::PAYLOAD_TOO_LARGE, "Payload size overflow").into_response()
+                }
             };
             if total_bytes > max_bytes {
                 drop(file);
                 return (
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    format!("Blob exceeds maximum allowed {max_bytes} bytes for kind '{}'", kind.as_str()),
+                    format!(
+                        "Blob exceeds maximum allowed {max_bytes} bytes for kind '{}'",
+                        kind.as_str()
+                    ),
                 )
                     .into_response();
             }
@@ -294,7 +299,10 @@ impl ArtifactServer {
         req: AxumRequest,
     ) -> Response {
         let Some(peer) = req.extensions().get::<AuthenticatedPeer>() else {
-            return (StatusCode::UNAUTHORIZED, "Client mTLS certificate required [INV-002]")
+            return (
+                StatusCode::UNAUTHORIZED,
+                "Client mTLS certificate required [INV-002]",
+            )
                 .into_response();
         };
         let allowed_ou = matches!(
@@ -320,26 +328,29 @@ impl ArtifactServer {
         let total = meta.size_bytes;
         let is_head = method == Method::HEAD;
 
-        let range_selection: Option<(u64, u64)> = if let Some(range_hdr) =
-            req.headers().get(RANGE).and_then(|v| v.to_str().ok())
-        {
-            match parse_single_byte_range(range_hdr, total) {
-                Ok(bounds) => Some(bounds),
-                Err(()) => {
-                    let mut h = HeaderMap::new();
-                    h.insert(CONTENT_RANGE, format!("bytes */{total}").parse().unwrap());
-                    h.insert(ACCEPT_RANGES, "bytes".parse().unwrap());
-                    return if is_head {
-                        (StatusCode::RANGE_NOT_SATISFIABLE, h, Body::empty()).into_response()
-                    } else {
-                        (StatusCode::RANGE_NOT_SATISFIABLE, h, "Range Not Satisfiable")
-                            .into_response()
-                    };
+        let range_selection: Option<(u64, u64)> =
+            if let Some(range_hdr) = req.headers().get(RANGE).and_then(|v| v.to_str().ok()) {
+                match parse_single_byte_range(range_hdr, total) {
+                    Ok(bounds) => Some(bounds),
+                    Err(()) => {
+                        let mut h = HeaderMap::new();
+                        h.insert(CONTENT_RANGE, format!("bytes */{total}").parse().unwrap());
+                        h.insert(ACCEPT_RANGES, "bytes".parse().unwrap());
+                        return if is_head {
+                            (StatusCode::RANGE_NOT_SATISFIABLE, h, Body::empty()).into_response()
+                        } else {
+                            (
+                                StatusCode::RANGE_NOT_SATISFIABLE,
+                                h,
+                                "Range Not Satisfiable",
+                            )
+                                .into_response()
+                        };
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         let (status, start, len) = match range_selection {
             Some((s, e)) => (StatusCode::PARTIAL_CONTENT, s, e - s + 1),
@@ -407,7 +418,11 @@ impl ArtifactServer {
                             Ok(0) => break,
                             Ok(n) => {
                                 remaining -= n as u64;
-                                if tx.send(Ok(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                                if tx
+                                    .send(Ok(Bytes::copy_from_slice(&buf[..n])))
+                                    .await
+                                    .is_err()
+                                {
                                     break;
                                 }
                             }
@@ -580,7 +595,14 @@ impl ArtifactServer {
         enrollment_ctx: Option<crate::pairing::EnrollmentContext>,
         shutdown_rx: tokio::sync::oneshot::Receiver<()>,
     ) {
-        Self::spawn_full_with_options(listener, store, scheduler, enrollment_ctx, true, shutdown_rx)
+        Self::spawn_full_with_options(
+            listener,
+            store,
+            scheduler,
+            enrollment_ctx,
+            true,
+            shutdown_rx,
+        )
     }
 
     /// Spawns the auxiliary `50052` HTTP server with configurable plaintext artifact exposure.

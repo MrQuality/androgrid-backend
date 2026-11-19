@@ -191,10 +191,7 @@ impl ArtifactStore {
     /// Allocates a unique `.tmp` path under `storage_dir` (or OS temp dir for in-memory stores).
     pub fn next_temp_path(&self) -> PathBuf {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = self
-            .storage_dir
-            .clone()
-            .unwrap_or_else(std::env::temp_dir);
+        let dir = self.storage_dir.clone().unwrap_or_else(std::env::temp_dir);
         let _ = std::fs::create_dir_all(&dir);
         dir.join(format!("upload-{}-{seq}.tmp", std::process::id()))
     }
@@ -256,11 +253,12 @@ impl ArtifactStore {
             .map_err(|e| ArtifactError::IoError(e.to_string()))?;
         cache.insert(sha256_hex.clone(), bytecode.to_vec());
         if let Ok(mut meta) = self.blob_meta.write() {
-            meta.entry(sha256_hex.clone()).or_insert_with(|| BlobMetadata {
-                kind: BlobKind::Wasm,
-                size_bytes: bytecode.len() as u64,
-                sha256: sha256_hex.clone(),
-            });
+            meta.entry(sha256_hex.clone())
+                .or_insert_with(|| BlobMetadata {
+                    kind: BlobKind::Wasm,
+                    size_bytes: bytecode.len() as u64,
+                    sha256: sha256_hex.clone(),
+                });
         }
 
         Ok(sha256_hex)
@@ -349,11 +347,13 @@ impl ArtifactStore {
         if let Some(ref dir) = self.storage_dir {
             let blob_path = dir.join(format!("{clean_sha}.blob"));
             if blob_path.is_file() {
-                let existing_meta = self.read_disk_metadata(dir, &clean_sha).unwrap_or(BlobMetadata {
-                    kind: BlobKind::Wasm,
-                    size_bytes,
-                    sha256: clean_sha.clone(),
-                });
+                let existing_meta =
+                    self.read_disk_metadata(dir, &clean_sha)
+                        .unwrap_or(BlobMetadata {
+                            kind: BlobKind::Wasm,
+                            size_bytes,
+                            sha256: clean_sha.clone(),
+                        });
                 if existing_meta.kind == kind {
                     return Ok(BlobCommitOutcome::IdempotentMatch(existing_meta));
                 }
@@ -369,8 +369,8 @@ impl ArtifactStore {
             };
             let meta_tmp = dir.join(format!("{clean_sha}.meta.json.tmp"));
             let meta_final = dir.join(format!("{clean_sha}.meta.json"));
-            let meta_json = serde_json::to_vec(&meta)
-                .map_err(|e| ArtifactError::IoError(e.to_string()))?;
+            let meta_json =
+                serde_json::to_vec(&meta).map_err(|e| ArtifactError::IoError(e.to_string()))?;
             tokio::fs::write(&meta_tmp, &meta_json)
                 .await
                 .map_err(|e| ArtifactError::IoError(e.to_string()))?;

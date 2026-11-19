@@ -223,7 +223,10 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         .send()
         .await
         .unwrap();
-    assert_eq!(r_bad_sha.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        r_bad_sha.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
 
     let r_oversized = admin_http
         .put(format!("{uri}/v1/blobs"))
@@ -249,11 +252,21 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         .unwrap();
     assert_eq!(r_get.status(), reqwest::StatusCode::OK);
     assert_eq!(
-        r_get.headers().get("x-artifact-size").unwrap().to_str().unwrap(),
+        r_get
+            .headers()
+            .get("x-artifact-size")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         payload_3m.len().to_string()
     );
     assert_eq!(
-        r_get.headers().get("x-artifact-sha256").unwrap().to_str().unwrap(),
+        r_get
+            .headers()
+            .get("x-artifact-sha256")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         sha_3m
     );
     assert_eq!(r_get.bytes().await.unwrap().len(), payload_3m.len());

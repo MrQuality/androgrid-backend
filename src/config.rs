@@ -234,10 +234,12 @@ impl ClusterConfig {
         }
 
         if let Ok(val) = std::env::var("ANDROGRID_MAX_APK_BYTES") {
-            config.max_apk_bytes = val.parse::<usize>().map_err(|_| ConfigError::InvalidInteger {
-                var: "ANDROGRID_MAX_APK_BYTES",
-                val,
-            })?;
+            config.max_apk_bytes =
+                val.parse::<usize>()
+                    .map_err(|_| ConfigError::InvalidInteger {
+                        var: "ANDROGRID_MAX_APK_BYTES",
+                        val,
+                    })?;
         }
 
         config.validate_renewal_policy()?;

@@ -161,10 +161,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let cluster_endpoint = config.listen_addr.to_string();
+    let effective_artifact_base_url = if mtls_enabled {
+        format!("https://{}/v1/blobs", config.listen_addr)
+    } else {
+        artifact_base_url
+    };
     let admin_service = AdminServiceImpl::with_services(
         Arc::clone(&scheduler),
         Arc::clone(&artifact_store),
-        artifact_base_url,
+        effective_artifact_base_url,
         Arc::clone(&token_store),
         ca_fingerprint,
         cluster_endpoint,

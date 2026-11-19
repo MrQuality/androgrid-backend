@@ -327,7 +327,11 @@ impl AdminService for AdminServiceImpl {
         {
             Ok(sha256) => {
                 let base = self.artifact_base_url.trim_end_matches('/');
-                let artifact_url = format!("{base}/artifacts/{sha256}.wasm");
+                let artifact_url = if base.ends_with("/v1/blobs") {
+                    format!("{base}/{sha256}")
+                } else {
+                    format!("{base}/artifacts/{sha256}.wasm")
+                };
                 Ok(Response::new(UploadArtifactResponse {
                     success: true,
                     artifact_sha256: sha256,

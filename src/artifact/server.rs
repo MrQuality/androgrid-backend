@@ -186,13 +186,21 @@ impl ArtifactServer {
         let tmp_path = state.store.next_temp_path();
         let guard = TempFileGuard::new(tmp_path.clone());
 
-        let mut file = match tokio::fs::File::create(&tmp_path).await {
+        let file = match tokio::fs::File::create(&tmp_path).await {
             Ok(f) => f,
             Err(e) => {
                 error!("Failed creating blob temp file: {e}");
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
         };
+        let mut writer = tokio::io::BufWriter::with_capacity(256 * 1024, file);
+
+        let expected_magic: &[u8] = match kind {
+            BlobKind::Wasm => b"\x00asm\x01\x00\x00\x00",
+            BlobKind::Apk => b"PK\x03\x04",
+        };
+        let mut magic_buf = Vec::with_capacity(expected_magic.len());
+        let mut magic_checked = false;
 
         let mut hasher = Sha256::new();
         let mut total_bytes: usize = 0;
@@ -213,7 +221,7 @@ impl ArtifactServer {
                 }
             };
             if total_bytes > max_bytes {
-                drop(file);
+                drop(writer);
                 return (
                     StatusCode::PAYLOAD_TOO_LARGE,
                     format!(
@@ -223,8 +231,24 @@ impl ArtifactServer {
                 )
                     .into_response();
             }
+            if !magic_checked {
+                let need = expected_magic.len().saturating_sub(magic_buf.len());
+                let take = need.min(chunk.len());
+                magic_buf.extend_from_slice(&chunk[..take]);
+                if magic_buf.len() == expected_magic.len() {
+                    if magic_buf.as_slice() != expected_magic {
+                        drop(writer);
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("Payload magic bytes do not match kind '{}'", kind.as_str()),
+                        )
+                            .into_response();
+                    }
+                    magic_checked = true;
+                }
+            }
             hasher.update(&chunk);
-            if let Err(e) = file.write_all(&chunk).await {
+            if let Err(e) = writer.write_all(&chunk).await {
                 return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
         }
@@ -232,10 +256,17 @@ impl ArtifactServer {
         if total_bytes == 0 {
             return (StatusCode::BAD_REQUEST, "Blob payload must not be empty").into_response();
         }
-        if let Err(e) = file.flush().await {
+        if !magic_checked {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Payload too short for '{}' magic header", kind.as_str()),
+            )
+                .into_response();
+        }
+        if let Err(e) = writer.flush().await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
-        drop(file);
+        drop(writer);
 
         let computed_sha = format!("{:x}", hasher.finalize());
         if let Some(ref exp) = expected_sha {
@@ -415,7 +446,10 @@ impl ArtifactServer {
                     while remaining > 0 {
                         let to_read = (remaining as usize).min(buf.len());
                         match file.read(&mut buf[..to_read]).await {
-                            Ok(0) => break,
+                            Ok(0) => {
+                                error!(remaining, "Unexpected EOF reading blob file from disk");
+                                break;
+                            }
                             Ok(n) => {
                                 remaining -= n as u64;
                                 if tx
@@ -642,7 +676,14 @@ fn parse_single_byte_range(header: &str, total: u64) -> Result<(u64, u64), ()> {
     if total == 0 {
         return Err(());
     }
-    let spec = header.trim().strip_prefix("bytes=").ok_or(())?;
+    let trimmed = header.trim();
+    if !trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bytes="))
+    {
+        return Err(());
+    }
+    let spec = &trimmed[6..];
     if spec.contains(',') {
         return Err(());
     }

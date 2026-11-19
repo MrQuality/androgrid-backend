@@ -113,7 +113,14 @@ fn build_reqwest_mtls(ca_pem: &str, cert_pem: &str, key_pem: &str) -> reqwest::C
 #[tokio::test]
 async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
     let pki = generate_test_pki();
-    let temp_dir = std::env::temp_dir().join("androgrid_dual_plane_blobs_test");
+    let temp_dir = std::env::temp_dir().join(format!(
+        "androgrid_dual_plane_blobs_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     let _ = std::fs::remove_dir_all(&temp_dir);
 
     let store = Arc::new(ArtifactStore::with_directory(&temp_dir));
@@ -206,14 +213,73 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         .unwrap();
     assert_eq!(r_put2.status(), reqwest::StatusCode::OK);
 
-    let r_conflict = admin_http
+    let r_bad_magic = admin_http
         .put(format!("{uri}/v1/blobs"))
         .header("X-Artifact-Kind", "apk")
         .body(payload_3m.clone())
         .send()
         .await
         .unwrap();
-    assert_eq!(r_conflict.status(), reqwest::StatusCode::CONFLICT);
+    assert_eq!(
+        r_bad_magic.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    );
+
+    // 2b. APK > 16 MB end-to-end PUT + GET (Content-Type: application/vnd.android.package-archive)
+    let mut apk_17m = vec![0x5Au8; 17 * 1024 * 1024];
+    apk_17m[..4].copy_from_slice(b"PK\x03\x04");
+    let sha_apk = ArtifactStore::compute_sha256(&apk_17m);
+    let r_apk_put = admin_http
+        .put(format!("{uri}/v1/blobs"))
+        .header("X-Artifact-Kind", "apk")
+        .header("X-Expected-Sha256", sha_apk.clone())
+        .body(apk_17m.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r_apk_put.status(), reqwest::StatusCode::CREATED);
+
+    let r_apk_get = worker_http
+        .get(format!("{uri}/v1/blobs/{sha_apk}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r_apk_get.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        r_apk_get
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/vnd.android.package-archive"
+    );
+    assert_eq!(r_apk_get.bytes().await.unwrap().len(), apk_17m.len());
+
+    // 2c. Mid-stream abort cleans up .tmp files via TempFileGuard Drop
+    let failing_stream = tokio_stream::iter(vec![
+        Ok::<Vec<u8>, std::io::Error>(b"\x00asm\x01\x00\x00\x00partial".to_vec()),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "simulated client disconnect",
+        )),
+    ]);
+    let _ = admin_http
+        .put(format!("{uri}/v1/blobs"))
+        .header("X-Artifact-Kind", "wasm")
+        .body(reqwest::Body::wrap_stream(failing_stream))
+        .send()
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let leftover_tmps: Vec<_> = std::fs::read_dir(&temp_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("tmp"))
+        .collect();
+    assert!(
+        leftover_tmps.is_empty(),
+        "TempFileGuard must clean up .tmp files on mid-stream abort"
+    );
 
     // 4. Bad X-Expected-Sha256 digest -> 422, oversized > 16 MiB WASM -> 413 with 0 leftover .tmp
     let r_bad_sha = admin_http
@@ -228,10 +294,12 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         reqwest::StatusCode::UNPROCESSABLE_ENTITY
     );
 
+    let mut oversized_wasm = vec![0x99u8; 16 * 1024 * 1024 + 1];
+    oversized_wasm[..8].copy_from_slice(b"\x00asm\x01\x00\x00\x00");
     let r_oversized = admin_http
         .put(format!("{uri}/v1/blobs"))
         .header("X-Artifact-Kind", "wasm")
-        .body(vec![0x99u8; 16 * 1024 * 1024 + 1])
+        .body(oversized_wasm)
         .send()
         .await
         .unwrap();
@@ -364,6 +432,16 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         .await
         .unwrap();
     assert_eq!(aux_health.status(), axum::http::StatusCode::OK);
+    let health_bytes = axum::body::to_bytes(aux_health.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let health_json: serde_json::Value = serde_json::from_slice(&health_bytes).unwrap();
+    assert!(
+        health_json["cached_artifacts"].as_u64().unwrap_or(0) >= 2,
+        "/health must reflect disk-backed .blob artifacts"
+    );
+    assert!(store.has_artifact(&sha_3m));
+    assert_eq!(store.get_artifact_size(&sha_3m), Some(payload_3m.len()));
     let aux_artifact = aux_router
         .oneshot(
             axum::http::Request::builder()

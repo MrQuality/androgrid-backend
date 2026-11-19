@@ -156,7 +156,9 @@ impl ArtifactStore {
     /// * `storage_dir` - Directory path where artifact binaries are persisted.
     pub fn with_directory<P: AsRef<Path>>(storage_dir: P) -> Self {
         let dir = storage_dir.as_ref().to_path_buf();
-        let _ = std::fs::create_dir_all(&dir);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(dir = %dir.display(), error = %e, "Failed to create artifact storage directory");
+        }
         Self {
             cache: RwLock::new(HashMap::new()),
             blob_meta: RwLock::new(HashMap::new()),
@@ -301,10 +303,12 @@ impl ArtifactStore {
         if let Some(ref dir) = self.storage_dir {
             let blob_path = dir.join(format!("{clean_sha}.blob"));
             if blob_path.is_file() {
-                if let Some(meta) = self.read_disk_metadata(dir, &clean_sha) {
-                    if meta.kind != BlobKind::Wasm {
-                        return None;
-                    }
+                let Some(meta) = self.read_disk_metadata(dir, &clean_sha) else {
+                    tracing::warn!(sha256 = %clean_sha, "Refusing to serve .blob without valid .meta.json sidecar");
+                    return None;
+                };
+                if meta.kind != BlobKind::Wasm {
+                    return None;
                 }
                 if let Ok(bytes) = std::fs::read(&blob_path) {
                     return Some(bytes);
@@ -341,19 +345,30 @@ impl ArtifactStore {
         size_bytes: u64,
         kind: BlobKind,
     ) -> Result<BlobCommitOutcome, ArtifactError> {
-        let _lock = self.commit_lock.lock().await;
         let clean_sha = sha256_hex.to_ascii_lowercase();
+
+        // In-memory fallback reads temp bytes before acquiring commit_lock so large reads
+        // do not stall unrelated concurrent uploads.
+        let in_memory_bytes = if self.storage_dir.is_none() {
+            Some(
+                tokio::fs::read(guard.path())
+                    .await
+                    .map_err(|e| ArtifactError::IoError(e.to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        let _lock = self.commit_lock.lock().await;
 
         if let Some(ref dir) = self.storage_dir {
             let blob_path = dir.join(format!("{clean_sha}.blob"));
             if blob_path.is_file() {
-                let existing_meta =
-                    self.read_disk_metadata(dir, &clean_sha)
-                        .unwrap_or(BlobMetadata {
-                            kind: BlobKind::Wasm,
-                            size_bytes,
-                            sha256: clean_sha.clone(),
-                        });
+                let existing_meta = self.read_disk_metadata(dir, &clean_sha).ok_or_else(|| {
+                    ArtifactError::IoError(format!(
+                        "Existing blob '{clean_sha}' is missing or has corrupt .meta.json sidecar"
+                    ))
+                })?;
                 if existing_meta.kind == kind {
                     return Ok(BlobCommitOutcome::IdempotentMatch(existing_meta));
                 }
@@ -374,20 +389,21 @@ impl ArtifactStore {
             tokio::fs::write(&meta_tmp, &meta_json)
                 .await
                 .map_err(|e| ArtifactError::IoError(e.to_string()))?;
-            tokio::fs::rename(&meta_tmp, &meta_final)
-                .await
-                .map_err(|e| ArtifactError::IoError(e.to_string()))?;
-            tokio::fs::rename(guard.path(), &blob_path)
-                .await
-                .map_err(|e| ArtifactError::IoError(e.to_string()))?;
+            if let Err(e) = tokio::fs::rename(guard.path(), &blob_path).await {
+                let _ = tokio::fs::remove_file(&meta_tmp).await;
+                return Err(ArtifactError::IoError(e.to_string()));
+            }
+            if let Err(e) = tokio::fs::rename(&meta_tmp, &meta_final).await {
+                let _ = tokio::fs::remove_file(&blob_path).await;
+                let _ = tokio::fs::remove_file(&meta_tmp).await;
+                return Err(ArtifactError::IoError(e.to_string()));
+            }
             guard.mark_committed();
             return Ok(BlobCommitOutcome::Created(meta));
         }
 
         // In-memory store fallback when storage_dir is None
-        let bytes = tokio::fs::read(guard.path())
-            .await
-            .map_err(|e| ArtifactError::IoError(e.to_string()))?;
+        let bytes = in_memory_bytes.expect("in_memory_bytes populated when storage_dir is None");
         if let Ok(meta_map) = self.blob_meta.read() {
             if let Some(existing) = meta_map.get(&clean_sha) {
                 if existing.kind == kind {
@@ -472,6 +488,10 @@ impl ArtifactStore {
         }
 
         if let Some(ref dir) = self.storage_dir {
+            let blob_path = dir.join(format!("{clean_sha}.blob"));
+            if blob_path.is_file() && self.read_disk_metadata(dir, &clean_sha).is_some() {
+                return true;
+            }
             let file_path = dir.join(format!("{clean_sha}.wasm"));
             if file_path.is_file() {
                 return true;
@@ -495,6 +515,12 @@ impl ArtifactStore {
         }
 
         if let Some(ref dir) = self.storage_dir {
+            let blob_path = dir.join(format!("{clean_sha}.blob"));
+            if blob_path.is_file() && self.read_disk_metadata(dir, &clean_sha).is_some() {
+                if let Ok(meta) = std::fs::metadata(blob_path) {
+                    return Some(meta.len() as usize);
+                }
+            }
             let file_path = dir.join(format!("{clean_sha}.wasm"));
             if let Ok(meta) = std::fs::metadata(file_path) {
                 return Some(meta.len() as usize);
@@ -506,11 +532,34 @@ impl ArtifactStore {
 
     /// Lists all SHA-256 keys of currently indexed artifacts.
     pub fn list_artifacts(&self) -> Vec<String> {
+        let mut keys: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         if let Ok(cache) = self.cache.read() {
-            cache.keys().cloned().collect()
-        } else {
-            Vec::new()
+            keys.extend(cache.keys().cloned());
         }
+        if let Some(ref dir) = self.storage_dir {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+                        continue;
+                    };
+                    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                        continue;
+                    };
+                    if let Some(clean_sha) = Self::normalize_sha256_hex(stem) {
+                        if ext == "wasm"
+                            || (ext == "blob" && self.read_disk_metadata(dir, &clean_sha).is_some())
+                        {
+                            keys.insert(clean_sha);
+                        }
+                    }
+                }
+            }
+        }
+        keys.into_iter().collect()
     }
 }
 
@@ -619,6 +668,62 @@ mod tests {
         let (meta, src) = store.get_blob_info(&sha).expect("blob info");
         assert_eq!(meta.kind, BlobKind::Wasm);
         assert!(matches!(src, BlobSource::File(_)));
+        assert!(store.has_artifact(&sha));
+        assert_eq!(store.get_artifact_size(&sha), Some(payload.len()));
+        assert!(store.list_artifacts().contains(&sha));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_missing_or_corrupt_meta_sidecar_fails_closed() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "androgrid_store_fail_closed_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = ArtifactStore::with_directory(&temp_dir);
+
+        let payload = b"\x00asm\x01\x00\x00\x00fail_closed";
+        let sha = ArtifactStore::compute_sha256(payload);
+        let p1 = store.next_temp_path();
+        tokio::fs::write(&p1, payload).await.unwrap();
+        store
+            .commit_temp_blob(
+                TempFileGuard::new(p1),
+                sha.clone(),
+                payload.len() as u64,
+                BlobKind::Wasm,
+            )
+            .await
+            .unwrap();
+
+        // Corrupt the .meta.json sidecar
+        let meta_path = temp_dir.join(format!("{sha}.meta.json"));
+        tokio::fs::write(&meta_path, b"{not-valid-json")
+            .await
+            .unwrap();
+
+        assert!(store.get_artifact(&sha).is_none());
+        assert!(!store.has_artifact(&sha));
+        assert!(store.get_artifact_size(&sha).is_none());
+        assert!(!store.list_artifacts().contains(&sha));
+
+        let p2 = store.next_temp_path();
+        tokio::fs::write(&p2, payload).await.unwrap();
+        let err = store
+            .commit_temp_blob(
+                TempFileGuard::new(p2),
+                sha.clone(),
+                payload.len() as u64,
+                BlobKind::Wasm,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ArtifactError::IoError(_)));
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

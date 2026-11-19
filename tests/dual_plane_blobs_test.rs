@@ -189,7 +189,7 @@ async fn test_dual_plane_50051_rbac_streaming_range_and_50052_hardening() {
         .unwrap();
     assert_eq!(r_worker_put.status(), reqwest::StatusCode::FORBIDDEN);
 
-    // 3. Admin (OU=Control Plane) PUT > 2 MiB WASM -> 201 Created, idempotent -> 200 OK, kind conflict -> 409
+    // 3. Admin (OU=Control Plane) PUT > 2 MiB WASM -> 201 Created, idempotent -> 200 OK, bad magic -> 422, Apk > 16 MB, mid-stream abort
     let mut payload_3m = vec![0x42u8; 3 * 1024 * 1024];
     payload_3m[..8].copy_from_slice(b"\x00asm\x01\x00\x00\x00");
     let sha_3m = ArtifactStore::compute_sha256(&payload_3m);

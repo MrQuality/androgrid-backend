@@ -162,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cluster_endpoint = config.listen_addr.to_string();
     let effective_artifact_base_url = if mtls_enabled {
-        format!("https://{}/v1/blobs", config.listen_addr)
+        config.resolve_mtls_blob_base_url()
     } else {
         artifact_base_url
     };

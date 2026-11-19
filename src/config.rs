@@ -289,6 +289,36 @@ impl ClusterConfig {
         )
     }
 
+    /// Resolves the mTLS `/v1/blobs` base URL when dual-plane TLS is enabled.
+    ///
+    /// Prefers `artifact_base_url` (`ANDROGRID_ARTIFACT_BASE_URL`) when configured,
+    /// appending `/v1/blobs` if not already present. Otherwise derives an HTTPS URL from
+    /// `listen_addr`, normalizing unspecified bind addresses (`0.0.0.0`, `::`) to loopback.
+    ///
+    /// Traces to: [INV-002], [NFR-PERF-001], ADR-008
+    pub fn resolve_mtls_blob_base_url(&self) -> String {
+        if let Some(ref base) = self.artifact_base_url {
+            let trimmed = base.trim_end_matches('/');
+            if trimmed.ends_with("/v1/blobs") {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}/v1/blobs")
+            }
+        } else {
+            let port = self.listen_addr.port();
+            match self.listen_addr.ip() {
+                std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+                    format!("https://127.0.0.1:{port}/v1/blobs")
+                }
+                std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+                    format!("https://[::1]:{port}/v1/blobs")
+                }
+                std::net::IpAddr::V6(ip) => format!("https://[{ip}]:{port}/v1/blobs"),
+                std::net::IpAddr::V4(ip) => format!("https://{ip}:{port}/v1/blobs"),
+            }
+        }
+    }
+
     /// Checks if full mutual TLS credentials are provided in configuration.
     pub fn is_mtls_configured(&self) -> bool {
         self.tls_ca_cert_path.is_some()
@@ -326,5 +356,27 @@ mod tests {
 
         config.tls_server_key_path = Some(PathBuf::from("/etc/server.key"));
         assert!(config.is_mtls_configured());
+    }
+
+    #[test]
+    fn test_resolve_mtls_blob_base_url_honors_override_and_normalizes_unspecified() {
+        let mut config = ClusterConfig::default();
+        config.listen_addr = "0.0.0.0:50051".parse().unwrap();
+        assert_eq!(
+            config.resolve_mtls_blob_base_url(),
+            "https://127.0.0.1:50051/v1/blobs"
+        );
+
+        config.artifact_base_url = Some("https://cluster.example.com/".to_string());
+        assert_eq!(
+            config.resolve_mtls_blob_base_url(),
+            "https://cluster.example.com/v1/blobs"
+        );
+
+        config.artifact_base_url = Some("https://cluster.example.com/v1/blobs/".to_string());
+        assert_eq!(
+            config.resolve_mtls_blob_base_url(),
+            "https://cluster.example.com/v1/blobs"
+        );
     }
 }

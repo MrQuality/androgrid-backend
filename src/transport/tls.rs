@@ -6,6 +6,7 @@
 use std::future::Future;
 use std::io::Cursor;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -16,6 +17,8 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::{RootCertStore, ServerConfig};
 use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 use tokio_rustls::TlsAcceptor;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 use tonic::{Request, Status};
@@ -229,10 +232,19 @@ pub fn build_bootstrap_rustls_server_config(
     Ok(cfg)
 }
 
+/// Default TLS handshake timeout for unauthenticated pre-TLS peers on `50051`.
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum concurrent accepted connections on the dual-plane `50051` listener.
+pub const MAX_DUAL_PLANE_CONNECTIONS: usize = 1024;
+/// Maximum time to drain active HTTP/2 / gRPC connections on shutdown.
+pub const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Serves a combined Tonic gRPC + Axum REST `Router` over TLS 1.3 mTLS on `listener`.
 ///
 /// Parses the peer's leaf X.509 certificate once per accepted TLS stream into
 /// `Option<AuthenticatedPeer>` and injects it into every HTTP request's `Extensions`.
+/// Enforces bounded connection concurrency, a TLS handshake timeout, and graceful
+/// connection draining on shutdown.
 ///
 /// Traces to: [INV-002], [NFR-SEC-001], ADR-008
 pub async fn serve_dual_plane_tls<F>(
@@ -243,7 +255,34 @@ pub async fn serve_dual_plane_tls<F>(
 ) where
     F: Future<Output = ()> + Send + 'static,
 {
+    serve_dual_plane_tls_with_limits(
+        listener,
+        tls_config,
+        router,
+        shutdown,
+        DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+        MAX_DUAL_PLANE_CONNECTIONS,
+        DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
+    )
+    .await;
+}
+
+/// Configurable variant of [`serve_dual_plane_tls`] with explicit handshake timeout,
+/// connection cap, and shutdown drain deadline.
+pub async fn serve_dual_plane_tls_with_limits<F>(
+    listener: TcpListener,
+    tls_config: ServerConfig,
+    router: Router,
+    shutdown: F,
+    handshake_timeout: Duration,
+    max_connections: usize,
+    drain_timeout: Duration,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
     let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    let conn_limit = Arc::new(Semaphore::new(max_connections.max(1)));
+    let mut active_tasks = JoinSet::new();
     tokio::pin!(shutdown);
 
     loop {
@@ -251,23 +290,44 @@ pub async fn serve_dual_plane_tls<F>(
             _ = &mut shutdown => {
                 break;
             }
+            Some(_) = active_tasks.join_next(), if !active_tasks.is_empty() => {}
             accept_res = listener.accept() => {
-                let (tcp_stream, _remote_addr) = match accept_res {
+                let (tcp_stream, remote_addr) = match accept_res {
                     Ok(pair) => pair,
                     Err(_) => break,
                 };
+                let Ok(permit) = conn_limit.clone().try_acquire_owned() else {
+                    tracing::warn!(%remote_addr, "Dual-plane TLS connection limit reached; dropping peer");
+                    drop(tcp_stream);
+                    continue;
+                };
                 let acceptor = acceptor.clone();
                 let router = router.clone();
-                tokio::spawn(async move {
-                    let Ok(tls_stream) = acceptor.accept(tcp_stream).await else {
-                        return;
+                active_tasks.spawn(async move {
+                    let _permit = permit;
+                    let tls_stream = match tokio::time::timeout(handshake_timeout, acceptor.accept(tcp_stream)).await {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(e)) => {
+                            tracing::debug!(%remote_addr, error = %e, "Dual-plane TLS handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(%remote_addr, "Dual-plane TLS handshake timed out");
+                            return;
+                        }
                     };
                     let peer: Option<AuthenticatedPeer> = tls_stream
                         .get_ref()
                         .1
                         .peer_certificates()
                         .and_then(|certs| certs.first())
-                        .and_then(|leaf| parse_leaf_identity(leaf.as_ref()).ok());
+                        .and_then(|leaf| match parse_leaf_identity(leaf.as_ref()) {
+                            Ok(identity) => Some(identity),
+                            Err(e) => {
+                                tracing::warn!(%remote_addr, error = %e, "Rejected malformed client X.509 identity");
+                                None
+                            }
+                        });
 
                     let svc = tower::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
                         let router = router.clone();
@@ -286,5 +346,59 @@ pub async fn serve_dual_plane_tls<F>(
                 });
             }
         }
+    }
+
+    if !active_tasks.is_empty() {
+        let _ = tokio::time::timeout(drain_timeout, async {
+            while active_tasks.join_next().await.is_some() {}
+        })
+        .await;
+        active_tasks.abort_all();
+    }
+}
+
+#[cfg(test)]
+mod dual_plane_tls_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn test_serve_dual_plane_tls_times_out_stalled_handshake_and_drains_cleanly() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_pem = certified.cert.pem().into_bytes();
+        let key_pem = certified.key_pair.serialize_pem().into_bytes();
+        let tls_cfg = build_bootstrap_rustls_server_config(&cert_pem, &key_pem, &cert_pem).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let server_task = tokio::spawn(serve_dual_plane_tls_with_limits(
+            listener,
+            tls_cfg,
+            Router::new(),
+            async move {
+                let _ = rx.await;
+            },
+            Duration::from_millis(100),
+            4,
+            Duration::from_millis(200),
+        ));
+
+        // Connect raw TCP and never send ClientHello (Slowloris)
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 16];
+        let read_res = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf))
+            .await
+            .expect("stalled peer should be closed by handshake timeout")
+            .unwrap();
+        assert_eq!(read_res, 0, "server must close stalled TCP connection");
+
+        let _ = tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server should drain cleanly")
+            .unwrap();
     }
 }

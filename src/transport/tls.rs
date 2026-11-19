@@ -3,9 +3,26 @@
 //! Enforces strict bidirectional cryptographic identity verification.
 //! Traces to: AG-SPEC-2026-V2 Section 2.3, [INV-002], [NFR-SEC-001]
 
+use std::future::Future;
+use std::io::Cursor;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder as HyperAutoBuilder;
+use hyper_util::service::TowerToHyperService;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
+use rustls::{RootCertStore, ServerConfig};
 use sha2::{Digest, Sha256};
+use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio_rustls::TlsAcceptor;
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 use tonic::{Request, Status};
+use tower::ServiceExt;
 
 /// Constructs a ServerTlsConfig that enforces TLS 1.3 mutual authentication (mTLS).
 ///
@@ -81,6 +98,9 @@ pub struct AuthenticatedPeer {
 ///
 /// Traces to: [INV-002], [NFR-SEC-001]
 pub fn require_client_mtls_interceptor(mut request: Request<()>) -> Result<Request<()>, Status> {
+    if request.extensions().get::<AuthenticatedPeer>().is_some() {
+        return Ok(request);
+    }
     let peer = match request.peer_certs() {
         Some(certs) if !certs.is_empty() => parse_leaf_identity(certs[0].as_ref())?,
         _ => {
@@ -93,7 +113,8 @@ pub fn require_client_mtls_interceptor(mut request: Request<()>) -> Result<Reque
     Ok(request)
 }
 
-fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
+/// Parses a DER-encoded X.509 leaf certificate into [`AuthenticatedPeer`].
+pub fn parse_leaf_identity(der: &[u8]) -> Result<AuthenticatedPeer, Status> {
     let (_, cert) = x509_parser::parse_x509_certificate(der)
         .map_err(|e| Status::unauthenticated(format!("Invalid client X.509 certificate: {e}")))?;
 
@@ -170,4 +191,227 @@ pub fn build_client_mtls_config(
         .domain_name(domain_name)
         .identity(identity)
         .ca_certificate(server_ca)
+}
+
+/// Constructs a `rustls::ServerConfig` for dual-plane TLS 1.3 serving both gRPC and REST.
+///
+/// Mirrors [`build_server_bootstrap_tls_config`] by enabling `allow_unauthenticated()` so
+/// `EnrollmentService` remains reachable during bootstrap while verified client leaf certificates
+/// are parsed once per connection into [`AuthenticatedPeer`].
+///
+/// Traces to: [INV-002], [NFR-SEC-001], ADR-008
+pub fn build_bootstrap_rustls_server_config(
+    server_cert_pem: &[u8],
+    server_key_pem: &[u8],
+    client_ca_pem: &[u8],
+) -> Result<ServerConfig, Box<dyn std::error::Error + Send + Sync>> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let mut cert_reader = Cursor::new(server_cert_pem);
+    let certs: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
+
+    let mut key_reader = Cursor::new(server_key_pem);
+    let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)?
+        .ok_or("No private key found in server key PEM")?;
+
+    let mut ca_reader = Cursor::new(client_ca_pem);
+    let mut roots = RootCertStore::empty();
+    for ca in rustls_pemfile::certs(&mut ca_reader) {
+        roots.add(ca?)?;
+    }
+
+    let verifier = WebPkiClientVerifier::builder(Arc::new(roots))
+        .allow_unauthenticated()
+        .build()?;
+
+    let mut cfg = ServerConfig::builder()
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)?;
+    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(cfg)
+}
+
+/// Default TLS handshake timeout for unauthenticated pre-TLS peers on `50051`.
+pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum concurrent accepted connections on the dual-plane `50051` listener.
+pub const MAX_DUAL_PLANE_CONNECTIONS: usize = 1024;
+/// Maximum time to drain active HTTP/2 / gRPC connections on shutdown.
+pub const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Serves a combined Tonic gRPC + Axum REST `Router` over TLS 1.3 mTLS on `listener`.
+///
+/// Parses the peer's leaf X.509 certificate once per accepted TLS stream into
+/// `Option<AuthenticatedPeer>` and injects it into every HTTP request's `Extensions`.
+/// Enforces bounded connection concurrency, a TLS handshake timeout, and graceful
+/// connection draining on shutdown.
+///
+/// Traces to: [INV-002], [NFR-SEC-001], ADR-008
+pub async fn serve_dual_plane_tls<F>(
+    listener: TcpListener,
+    tls_config: ServerConfig,
+    router: Router,
+    shutdown: F,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    serve_dual_plane_tls_with_limits(
+        listener,
+        tls_config,
+        router,
+        shutdown,
+        DEFAULT_TLS_HANDSHAKE_TIMEOUT,
+        MAX_DUAL_PLANE_CONNECTIONS,
+        DEFAULT_SHUTDOWN_DRAIN_TIMEOUT,
+    )
+    .await;
+}
+
+/// Configurable variant of [`serve_dual_plane_tls`] with explicit handshake timeout,
+/// connection cap, and shutdown drain deadline.
+pub async fn serve_dual_plane_tls_with_limits<F>(
+    listener: TcpListener,
+    tls_config: ServerConfig,
+    router: Router,
+    shutdown: F,
+    handshake_timeout: Duration,
+    max_connections: usize,
+    drain_timeout: Duration,
+) where
+    F: Future<Output = ()> + Send + 'static,
+{
+    let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+    let conn_limit = Arc::new(Semaphore::new(max_connections.max(1)));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut active_tasks = JoinSet::new();
+    tokio::pin!(shutdown);
+
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => {
+                break;
+            }
+            Some(_) = active_tasks.join_next(), if !active_tasks.is_empty() => {}
+            accept_res = listener.accept() => {
+                let (tcp_stream, remote_addr) = match accept_res {
+                    Ok(pair) => pair,
+                    Err(_) => break,
+                };
+                let Ok(permit) = conn_limit.clone().try_acquire_owned() else {
+                    tracing::warn!(%remote_addr, "Dual-plane TLS connection limit reached; dropping peer");
+                    drop(tcp_stream);
+                    continue;
+                };
+                let acceptor = acceptor.clone();
+                let router = router.clone();
+                let mut conn_shutdown_rx = shutdown_rx.clone();
+                active_tasks.spawn(async move {
+                    let _permit = permit;
+                    let tls_stream = match tokio::time::timeout(handshake_timeout, acceptor.accept(tcp_stream)).await {
+                        Ok(Ok(stream)) => stream,
+                        Ok(Err(e)) => {
+                            tracing::debug!(%remote_addr, error = %e, "Dual-plane TLS handshake failed");
+                            return;
+                        }
+                        Err(_) => {
+                            tracing::warn!(%remote_addr, "Dual-plane TLS handshake timed out");
+                            return;
+                        }
+                    };
+                    let peer: Option<AuthenticatedPeer> = tls_stream
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(|certs| certs.first())
+                        .and_then(|leaf| match parse_leaf_identity(leaf.as_ref()) {
+                            Ok(identity) => Some(identity),
+                            Err(e) => {
+                                tracing::warn!(%remote_addr, error = %e, "Rejected malformed client X.509 identity");
+                                None
+                            }
+                        });
+
+                    let svc = tower::service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        let router = router.clone();
+                        let peer = peer.clone();
+                        async move {
+                            if let Some(p) = peer {
+                                req.extensions_mut().insert(p);
+                            }
+                            router.oneshot(req).await
+                        }
+                    });
+
+                    let builder = HyperAutoBuilder::new(TokioExecutor::new());
+                    let conn = builder.serve_connection(
+                        TokioIo::new(tls_stream),
+                        TowerToHyperService::new(svc),
+                    );
+                    tokio::pin!(conn);
+                    tokio::select! {
+                        _ = &mut conn => {}
+                        _ = conn_shutdown_rx.changed() => {
+                            conn.as_mut().graceful_shutdown();
+                            let _ = conn.await;
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    let _ = shutdown_tx.send(true);
+    if !active_tasks.is_empty() {
+        let _ = tokio::time::timeout(drain_timeout, async {
+            while active_tasks.join_next().await.is_some() {}
+        })
+        .await;
+        active_tasks.abort_all();
+    }
+}
+
+#[cfg(test)]
+mod dual_plane_tls_tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn test_serve_dual_plane_tls_times_out_stalled_handshake_and_drains_cleanly() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert_pem = certified.cert.pem().into_bytes();
+        let key_pem = certified.key_pair.serialize_pem().into_bytes();
+        let tls_cfg = build_bootstrap_rustls_server_config(&cert_pem, &key_pem, &cert_pem).unwrap();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+
+        let server_task = tokio::spawn(serve_dual_plane_tls_with_limits(
+            listener,
+            tls_cfg,
+            Router::new(),
+            async move {
+                let _ = rx.await;
+            },
+            Duration::from_millis(100),
+            4,
+            Duration::from_millis(200),
+        ));
+
+        // Connect raw TCP and never send ClientHello (Slowloris)
+        let mut stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 16];
+        let read_res = tokio::time::timeout(Duration::from_secs(2), stalled.read(&mut buf))
+            .await
+            .expect("stalled peer should be closed by handshake timeout")
+            .unwrap();
+        assert_eq!(read_res, 0, "server must close stalled TCP connection");
+
+        let _ = tx.send(());
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server should drain cleanly")
+            .unwrap();
+    }
 }

@@ -14,11 +14,13 @@ use tracing::{error, info, warn};
 use androgrid_backend::admin_service_server::AdminServiceServer;
 use androgrid_backend::andro_grid_service_server::AndroGridServiceServer;
 use androgrid_backend::enrollment_service_server::EnrollmentServiceServer;
+use androgrid_backend::transport::tls::{
+    build_bootstrap_rustls_server_config, serve_dual_plane_tls,
+};
 use androgrid_backend::{
-    build_server_bootstrap_tls_config, require_client_mtls_interceptor, AdminServiceImpl,
-    AndroGridServiceImpl, ArtifactServer, ArtifactStore, CaSigner, CertRenewalManager,
-    CertRenewalPolicy, ClusterConfig, ClusterScheduler, EnrollmentContext, EnrollmentServiceImpl,
-    PairingTokenStore, ThermalPolicy,
+    require_client_mtls_interceptor, AdminServiceImpl, AndroGridServiceImpl, ArtifactServer,
+    ArtifactStore, CaSigner, CertRenewalManager, CertRenewalPolicy, ClusterConfig,
+    ClusterScheduler, EnrollmentContext, EnrollmentServiceImpl, PairingTokenStore, ThermalPolicy,
 };
 
 #[derive(Parser, Debug)]
@@ -159,10 +161,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let cluster_endpoint = config.listen_addr.to_string();
+    let effective_artifact_base_url = if mtls_enabled {
+        config.resolve_mtls_blob_base_url()
+    } else {
+        artifact_base_url
+    };
     let admin_service = AdminServiceImpl::with_services(
         Arc::clone(&scheduler),
         Arc::clone(&artifact_store),
-        artifact_base_url,
+        effective_artifact_base_url,
         Arc::clone(&token_store),
         ca_fingerprint,
         cluster_endpoint,
@@ -186,36 +193,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         enrollment_ctx.clone()
     };
-    ArtifactServer::spawn_full(
+    ArtifactServer::spawn_full_with_options(
         artifact_listener,
         Arc::clone(&artifact_store),
         Arc::clone(&scheduler),
         http_enrollment_ctx,
+        !mtls_enabled,
         artifact_shutdown_rx,
     );
 
-    let mut server_builder = Server::builder();
-
-    if mtls_enabled {
-        info!("Enforcing TLS 1.3 mTLS with optional bootstrap client auth [REQ-OP-001], [INV-002], [NFR-SEC-001]");
-        let ca_path = config.tls_ca_cert_path.as_ref().unwrap();
-        let cert_path = config.tls_server_cert_path.as_ref().unwrap();
-        let key_path = config.tls_server_key_path.as_ref().unwrap();
-
-        let ca_cert_pem = tokio::fs::read(ca_path).await?;
-        let server_cert_pem = tokio::fs::read(cert_path).await?;
-        let server_key_pem = tokio::fs::read(key_path).await?;
-
-        let server_tls =
-            build_server_bootstrap_tls_config(&server_cert_pem, &server_key_pem, &ca_cert_pem);
-        server_builder = server_builder.tls_config(server_tls)?;
-    } else {
-        warn!("mTLS credentials not specified; binding plaintext service [development mode]");
-    }
-
     info!(
         addr = %config.listen_addr,
-        "Starting Tonic gRPC control plane service"
+        "Starting Control Plane service"
     );
 
     let shutdown_signal = async move {
@@ -226,22 +215,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = artifact_shutdown_tx.send(());
     };
 
-    let mut router = server_builder
-        .add_service(service_server)
-        .add_service(admin_server);
+    if mtls_enabled {
+        info!("Enforcing dual-plane TLS 1.3 mTLS on gRPC + /v1/blobs [REQ-OP-001], [INV-002], [NFR-SEC-001], ADR-008");
+        let ca_path = config.tls_ca_cert_path.as_ref().unwrap();
+        let cert_path = config.tls_server_cert_path.as_ref().unwrap();
+        let key_path = config.tls_server_key_path.as_ref().unwrap();
 
-    if let Some(ctx) = enrollment_ctx {
-        let enrollment_service =
-            EnrollmentServiceImpl::new(Arc::clone(&ctx.token_store), Arc::clone(&ctx.signer));
-        let enrollment_server = EnrollmentServiceServer::new(enrollment_service)
-            .max_decoding_message_size(config.max_frame_size_bytes)
-            .max_encoding_message_size(config.max_frame_size_bytes);
-        router = router.add_service(enrollment_server);
+        let ca_cert_pem = tokio::fs::read(ca_path).await?;
+        let server_cert_pem = tokio::fs::read(cert_path).await?;
+        let server_key_pem = tokio::fs::read(key_path).await?;
+
+        let server_tls =
+            build_bootstrap_rustls_server_config(&server_cert_pem, &server_key_pem, &ca_cert_pem)
+                .map_err(|e| format!("Failed to build dual-plane TLS config: {e}"))?;
+
+        let mut routes = tonic::service::Routes::new(service_server).add_service(admin_server);
+        if let Some(ctx) = enrollment_ctx {
+            let enrollment_service =
+                EnrollmentServiceImpl::new(Arc::clone(&ctx.token_store), Arc::clone(&ctx.signer));
+            let enrollment_server = EnrollmentServiceServer::new(enrollment_service)
+                .max_decoding_message_size(config.max_frame_size_bytes)
+                .max_encoding_message_size(config.max_frame_size_bytes);
+            routes = routes.add_service(enrollment_server);
+        }
+
+        let app_router = routes.into_axum_router().merge(ArtifactServer::blob_router(
+            Arc::clone(&artifact_store),
+            config.max_apk_bytes,
+        ));
+        let grpc_listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+        serve_dual_plane_tls(grpc_listener, server_tls, app_router, shutdown_signal).await;
+    } else {
+        warn!("mTLS credentials not specified; binding plaintext service [development mode]");
+        let mut router = Server::builder()
+            .add_service(service_server)
+            .add_service(admin_server);
+
+        if let Some(ctx) = enrollment_ctx {
+            let enrollment_service =
+                EnrollmentServiceImpl::new(Arc::clone(&ctx.token_store), Arc::clone(&ctx.signer));
+            let enrollment_server = EnrollmentServiceServer::new(enrollment_service)
+                .max_decoding_message_size(config.max_frame_size_bytes)
+                .max_encoding_message_size(config.max_frame_size_bytes);
+            router = router.add_service(enrollment_server);
+        }
+
+        router
+            .serve_with_shutdown(config.listen_addr, shutdown_signal)
+            .await?;
     }
-
-    router
-        .serve_with_shutdown(config.listen_addr, shutdown_signal)
-        .await?;
 
     info!("AndroGrid Control Plane terminated cleanly");
     Ok(())

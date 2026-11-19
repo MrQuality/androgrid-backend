@@ -18,6 +18,7 @@
   - [ADR-005: Interface Segregation Principle for AdminService vs AndroGridService](adr/ADR-005-interface-segregation-admin-vs-worker.md)
   - [ADR-006: TaskGroup Workload Abstraction and Atomic Epoch Replacement](adr/ADR-006-task-group-epoch-replacement.md)
   - [ADR-007: NodeGroup Partitioning and Targeted Fleet Operations](adr/ADR-007-node-group-partitioning.md)
+  - [ADR-008: Unified Dual-Plane mTLS Blob Distribution](adr/ADR-008-dual-plane-mtls-blob-distribution.md)
 - [Feature Architecture Decision Records](adr/ADR-001-documentation-portal.md)
   - [ADR-001: Documentation Portal](adr/ADR-001-documentation-portal.md)
   - [ADR-002: Release Automation](adr/ADR-002-release-automation.md)

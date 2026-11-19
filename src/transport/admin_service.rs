@@ -116,10 +116,19 @@ impl AdminServiceImpl {
                     "WASM task with empty wasm_bytecode requires a valid 64-char artifact_sha256",
                 ));
             }
-            if self.artifact_store.get_artifact(&clean_sha).is_none() {
-                return Err(Status::failed_precondition(format!(
-                    "Artifact '{clean_sha}' is not present in orchestrator ArtifactStore; upload it via UploadArtifact first"
-                )));
+            match self.artifact_store.get_blob_kind(&clean_sha) {
+                None => {
+                    return Err(Status::failed_precondition(format!(
+                        "Artifact '{clean_sha}' is not present in orchestrator ArtifactStore; upload it via UploadArtifact first"
+                    )));
+                }
+                Some(kind) if kind != crate::artifact::store::BlobKind::Wasm => {
+                    return Err(Status::invalid_argument(format!(
+                        "Artifact '{clean_sha}' has kind '{}' and cannot be scheduled as a WASM task",
+                        kind.as_str()
+                    )));
+                }
+                Some(_) => {}
             }
         }
         Ok(())
@@ -318,7 +327,11 @@ impl AdminService for AdminServiceImpl {
         {
             Ok(sha256) => {
                 let base = self.artifact_base_url.trim_end_matches('/');
-                let artifact_url = format!("{base}/artifacts/{sha256}.wasm");
+                let artifact_url = if base.ends_with("/v1/blobs") {
+                    format!("{base}/{sha256}")
+                } else {
+                    format!("{base}/artifacts/{sha256}.wasm")
+                };
                 Ok(Response::new(UploadArtifactResponse {
                     success: true,
                     artifact_sha256: sha256,
@@ -1139,5 +1152,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(task_err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn test_submit_task_rejects_apk_blob_kind_for_wasm_execution() {
+        use crate::admin_service_server::AdminService;
+        use crate::artifact::store::{BlobKind, TempFileGuard};
+
+        let temp_dir = std::env::temp_dir().join("androgrid_admin_apk_reject_test");
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        let artifact_store = Arc::new(ArtifactStore::with_directory(&temp_dir));
+        let payload = b"fake-apk-archive-bytes";
+        let sha = ArtifactStore::compute_sha256(payload);
+        let p = artifact_store.next_temp_path();
+        tokio::fs::write(&p, payload).await.unwrap();
+        artifact_store
+            .commit_temp_blob(
+                TempFileGuard::new(p),
+                sha.clone(),
+                payload.len() as u64,
+                BlobKind::Apk,
+            )
+            .await
+            .unwrap();
+
+        let svc = AdminServiceImpl::with_artifact_store(
+            Arc::new(ClusterScheduler::new()),
+            artifact_store,
+            "http://127.0.0.1:50052".to_string(),
+        );
+        let mut task = make_test_task("t-apk-as-wasm");
+        task.wasm_bytecode.clear();
+        task.artifact_sha256 = sha;
+
+        let err = svc
+            .submit_task(Request::new(SubmitTaskRequest { task: Some(task) }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

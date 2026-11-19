@@ -737,6 +737,7 @@ async fn create_channel(
     let mut endpoint_builder = tonic::transport::Endpoint::from_shared(endpoint.to_string())?;
 
     if let (Some(ca_path), Some(cert_path), Some(key_path)) = (ca_cert, client_cert, client_key) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let ca_pem = tokio::fs::read(ca_path).await?;
         let cert_pem = tokio::fs::read(cert_path).await?;
         let key_pem = tokio::fs::read(key_path).await?;
@@ -759,6 +760,58 @@ async fn create_channel(
 
     let channel = endpoint_builder.connect().await?;
     Ok(channel)
+}
+
+/// Uploads a WASM module over `/v1/blobs` using mTLS when TLS credentials are provided,
+/// falling back to unary `UploadArtifact` RPC in plaintext dev mode.
+async fn upload_wasm_artifact_cli(
+    client: &mut AdminServiceClient<tonic::transport::Channel>,
+    endpoint: &str,
+    ca_cert: Option<&Path>,
+    client_cert: Option<&Path>,
+    client_key: Option<&Path>,
+    bytecode: Vec<u8>,
+    sha256_hex: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let (Some(ca_path), Some(cert_path), Some(key_path)) = (ca_cert, client_cert, client_key) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let ca_pem = tokio::fs::read(ca_path).await?;
+        let mut combined_pem = tokio::fs::read(cert_path).await?;
+        let key_pem = tokio::fs::read(key_path).await?;
+        combined_pem.extend_from_slice(&key_pem);
+
+        let identity = reqwest::Identity::from_pem(&combined_pem)?;
+        let ca = reqwest::Certificate::from_pem(&ca_pem)?;
+        let http = reqwest::Client::builder()
+            .add_root_certificate(ca)
+            .identity(identity)
+            .use_rustls_tls()
+            .build()?;
+
+        let url = format!("{}/v1/blobs", endpoint.trim_end_matches('/'));
+        let resp = http
+            .put(&url)
+            .header("X-Artifact-Kind", "wasm")
+            .header("X-Expected-Sha256", sha256_hex)
+            .body(bytecode)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let msg = resp.text().await.unwrap_or_default();
+            return Err(format!("PUT /v1/blobs failed with {status}: {msg}").into());
+        }
+        return Ok(());
+    }
+
+    client
+        .upload_artifact(UploadArtifactRequest {
+            bytecode,
+            expected_sha256: sha256_hex.to_string(),
+        })
+        .await?;
+    Ok(())
 }
 
 /// Extracts a fallback `--san` `host:port` from a CLI `--endpoint` URL when the endpoint
@@ -994,7 +1047,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Cert { .. } => unreachable!(),
 
         Commands::Group { action } => {
-            handle_group_command(&mut client, action, &cli.format).await?;
+            handle_group_command(
+                &mut client,
+                &cli.endpoint,
+                cli.ca_cert.as_deref(),
+                cli.client_cert.as_deref(),
+                cli.client_key.as_deref(),
+                action,
+                &cli.format,
+            )
+            .await?;
         }
 
         Commands::NodeGroup { action } => {
@@ -1107,13 +1169,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
                     if !inline {
-                        // Register artifact with orchestrator over AdminService channel [NFR-PERF-001], [REQ-OP-003]
-                        client
-                            .upload_artifact(UploadArtifactRequest {
-                                bytecode: bytecode.clone(),
-                                expected_sha256: sha256_hex.clone(),
-                            })
-                            .await?;
+                        upload_wasm_artifact_cli(
+                            &mut client,
+                            &cli.endpoint,
+                            cli.ca_cert.as_deref(),
+                            cli.client_cert.as_deref(),
+                            cli.client_key.as_deref(),
+                            bytecode.clone(),
+                            &sha256_hex,
+                        )
+                        .await?;
                     }
 
                     let effective_bytecode = if inline {
@@ -1603,6 +1668,10 @@ struct GroupTemplateArgs {
 
 async fn resolve_group_template(
     client: &mut AdminServiceClient<tonic::transport::Channel>,
+    endpoint: &str,
+    ca_cert: Option<&Path>,
+    client_cert: Option<&Path>,
+    client_key: Option<&Path>,
     args: GroupTemplateArgs,
 ) -> Result<TaskTemplate, Box<dyn std::error::Error>> {
     let GroupTemplateArgs {
@@ -1625,12 +1694,16 @@ async fn resolve_group_template(
         let meta = WasiValidator::validate(&bytecode, &entrypoint)
             .map_err(|e| format!("WASI validation failed: {e}"))?;
         let sha256_hex = meta.artifact_sha256;
-        client
-            .upload_artifact(UploadArtifactRequest {
-                bytecode,
-                expected_sha256: sha256_hex.clone(),
-            })
-            .await?;
+        upload_wasm_artifact_cli(
+            client,
+            endpoint,
+            ca_cert,
+            client_cert,
+            client_key,
+            bytecode,
+            &sha256_hex,
+        )
+        .await?;
         (ExecutionEngine::WasmWasi as i32, String::new(), sha256_hex)
     } else if let Some(cmd) = shell {
         let engine = if root {
@@ -1757,6 +1830,10 @@ fn format_group_status_output(
 
 async fn handle_group_command(
     client: &mut AdminServiceClient<tonic::transport::Channel>,
+    endpoint: &str,
+    ca_cert: Option<&Path>,
+    client_cert: Option<&Path>,
+    client_key: Option<&Path>,
     action: GroupCommands,
     format: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1775,6 +1852,10 @@ async fn handle_group_command(
         } => {
             let template = resolve_group_template(
                 client,
+                endpoint,
+                ca_cert,
+                client_cert,
+                client_key,
                 GroupTemplateArgs {
                     wasm,
                     entrypoint,
@@ -1842,6 +1923,10 @@ async fn handle_group_command(
             };
             let template = resolve_group_template(
                 client,
+                endpoint,
+                ca_cert,
+                client_cert,
+                client_key,
                 GroupTemplateArgs {
                     wasm,
                     entrypoint,

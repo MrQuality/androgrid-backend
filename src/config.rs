@@ -360,8 +360,10 @@ mod tests {
 
     #[test]
     fn test_resolve_mtls_blob_base_url_honors_override_and_normalizes_unspecified() {
-        let mut config = ClusterConfig::default();
-        config.listen_addr = "0.0.0.0:50051".parse().unwrap();
+        let mut config = ClusterConfig {
+            listen_addr: "0.0.0.0:50051".parse().unwrap(),
+            ..Default::default()
+        };
         assert_eq!(
             config.resolve_mtls_blob_base_url(),
             "https://127.0.0.1:50051/v1/blobs"
